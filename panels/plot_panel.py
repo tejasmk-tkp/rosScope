@@ -65,8 +65,9 @@ def _draw_line_on_canvas(canvas, x0n, y0, x1n, y1, cw, ch, ymin, ymax):
     steps = max(abs(dx1 - dx0), abs(dy1 - dy0), 1)
     for i in range(steps + 1):
         t = i / steps
-        _plot_dot(canvas, int(dx0 + t * (dx1 - dx0)),
-                  int(dy0 + t * (dy1 - dy0)), cw, ch)
+        _plot_dot(
+            canvas, int(dx0 + t * (dx1 - dx0)), int(dy0 + t * (dy1 - dy0)), cw, ch
+        )
 
 
 def _draw_vline(canvas, xn, cw, ch):
@@ -98,8 +99,9 @@ def render_plot_text(series, markers, window, cw, ch) -> Text:
         for i in range(len(pts) - 1):
             xn0 = (pts[i].timestamp - t0) / window
             xn1 = (pts[i + 1].timestamp - t0) / window
-            _draw_line_on_canvas(layer, xn0, pts[i].value, xn1,
-                                 pts[i + 1].value, cw, ch, ymin, ymax)
+            _draw_line_on_canvas(
+                layer, xn0, pts[i].value, xn1, pts[i + 1].value, cw, ch, ymin, ymax
+            )
         topic_layers.append((layer, color))
 
     mcanvas = _make_canvas(cw, ch)
@@ -121,14 +123,16 @@ def render_plot_text(series, markers, window, cw, ch) -> Text:
 
         for cx in range(max(cw - AXIS_W, 1)):
             if mcanvas[cy][cx]:
-                result.append(chr(_BRAILLE_BASE | mcanvas[cy][cx]),
-                              style=Style(color="white"))
+                result.append(
+                    chr(_BRAILLE_BASE | mcanvas[cy][cx]), style=Style(color="white")
+                )
                 continue
             drawn = False
             for layer, color in topic_layers:
                 if layer[cy][cx]:
-                    result.append(chr(_BRAILLE_BASE | layer[cy][cx]),
-                                  style=Style(color=color))
+                    result.append(
+                        chr(_BRAILLE_BASE | layer[cy][cx]), style=Style(color=color)
+                    )
                     drawn = True
                     break
             if not drawn:
@@ -144,7 +148,10 @@ def render_plot_text(series, markers, window, cw, ch) -> Text:
 
 
 class TopicDropdown(OptionList):
-    """Floating OptionList at app level. Uses callback to avoid message routing issues."""
+    """
+    Generic floating OptionList. Uses direct callback to avoid app-level
+    message routing issues when mounted outside its logical parent.
+    """
 
     DEFAULT_CSS = """
     TopicDropdown {
@@ -161,8 +168,7 @@ class TopicDropdown(OptionList):
         super().__init__(**kwargs)
         self._on_chosen = on_chosen
 
-    def on_option_list_option_selected(
-            self, event: OptionList.OptionSelected) -> None:
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         self.display = False
         self._on_chosen(str(event.option.prompt))
         event.stop()
@@ -174,7 +180,12 @@ class TopicDropdown(OptionList):
 
 
 class TopicSearchBar(Widget):
-    """Input + floating OptionList. Emits TopicSearchBar.Selected(topic)."""
+    """
+    Two-stage picker:
+      Stage 1 — type to filter topics, pick one
+      Stage 2 — pick a field from that topic's available fields
+    Emits TopicSearchBar.Selected(topic_key) where topic_key = "topic::field".
+    """
 
     DEFAULT_CSS = """
     TopicSearchBar {
@@ -188,33 +199,48 @@ class TopicSearchBar(Widget):
     """
 
     class Selected(Message):
-
-        def __init__(self, topic: str) -> None:
+        def __init__(self, topic_key: str) -> None:
             super().__init__()
-            self.topic = topic
+            self.topic_key = topic_key  # "topic::field"
 
     def __init__(self, store: DataStore, **kwargs):
         super().__init__(**kwargs)
         self._store = store
         self._all_topics: List[str] = []
+        self._pending_topic: Optional[str] = None   # waiting for field selection
         self._dropdown: Optional[TopicDropdown] = None
 
     def compose(self) -> ComposeResult:
-        yield Input(placeholder="search & select topic to pin…",
-                    id="search_input")
+        yield Input(placeholder="search & select topic to pin…", id="search_input")
 
     def on_mount(self) -> None:
-        self._dropdown = TopicDropdown(on_chosen=self._on_topic_chosen,
+        self._dropdown = TopicDropdown(on_chosen=self._on_option_chosen,
                                        id="topic_dropdown")
         self.app.mount(self._dropdown)
         self.set_interval(2.0, self._refresh_topic_list)
 
-    def _on_topic_chosen(self, topic: str) -> None:
+    def _on_option_chosen(self, value: str) -> None:
+        if self._pending_topic is None:
+            # Stage 1: topic chosen — now show field picker
+            self._pending_topic = value
+            fields = self._store.snapshot_topic_fields(value)
+            if not fields:
+                # No fields known yet (topic not subscribed) — pin with "data" default
+                self._finish_selection(value, "data")
+                return
+            self._show_options(fields, placeholder=f"{value} › pick field")
+        else:
+            # Stage 2: field chosen
+            self._finish_selection(self._pending_topic, value)
+
+    def _finish_selection(self, topic: str, field: str) -> None:
+        self._pending_topic = None
         try:
             self.query_one("#search_input", Input).value = ""
         except NoMatches:
             pass
-        self.post_message(self.Selected(topic))
+        self._hide_dropdown()
+        self.post_message(self.Selected(f"{topic}::{field}"))
 
     def _reposition(self) -> None:
         if self._dropdown is None:
@@ -228,38 +254,55 @@ class TopicSearchBar(Widget):
             pass
 
     def _refresh_topic_list(self) -> None:
-        topics = [t.name for t in self._store.snapshot_topics()]
-        pinned = self._store.snapshot_plot_topics()
-        self._all_topics = sorted(set(topics + pinned))
+        self._all_topics = sorted(t.name for t in self._store.snapshot_topics())
 
-    def _show_dropdown(self, query: str) -> None:
+    def _show_options(self, options: List[str], placeholder: str = "") -> None:
         if self._dropdown is None:
             return
-        matches = ([t for t in self._all_topics if query.lower() in t.lower()]
-                   if query else self._all_topics)
         self._dropdown.clear_options()
+        self._dropdown.add_options(
+            [Option(o, id=o.replace("/", "__").replace(".", "_")) for o in options]
+        )
+        self._reposition()
+        self._dropdown.display = True
+        try:
+            self.query_one("#search_input", Input).placeholder = placeholder
+        except NoMatches:
+            pass
+
+    def _show_topic_dropdown(self, query: str) -> None:
+        matches = (
+            [t for t in self._all_topics if query.lower() in t.lower()]
+            if query else self._all_topics
+        )
         if matches:
-            self._dropdown.add_options(
-                [Option(t, id=t.replace("/", "__")) for t in matches])
-            self._reposition()
-            self._dropdown.display = True
+            self._show_options(matches)
         else:
-            self._dropdown.display = False
+            self._hide_dropdown()
 
     def _hide_dropdown(self) -> None:
         if self._dropdown:
             self._dropdown.display = False
+        self._pending_topic = None
+        try:
+            self.query_one("#search_input", Input).placeholder = "search & select topic to pin…"
+        except NoMatches:
+            pass
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "search_input":
-            self._show_dropdown(event.value)
+        if event.input.id == "search_input" and self._pending_topic is None:
+            self._show_topic_dropdown(event.value)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "search_input":
             val = event.value.strip()
-            if val:
-                self._hide_dropdown()
-                self.post_message(self.Selected(val))
+            if val and self._pending_topic is None:
+                # treat typed value as topic::field if it contains ::
+                if "::" in val:
+                    topic, field = val.split("::", 1)
+                    self._finish_selection(topic.strip(), field.strip())
+                else:
+                    self._finish_selection(val, "data")
                 event.input.value = ""
 
     def on_key(self, event) -> None:
@@ -302,7 +345,6 @@ class TopicChip(Widget):
     """
 
     class UnpinRequested(Message):
-
         def __init__(self, topic: str) -> None:
             super().__init__()
             self.topic = topic
@@ -310,17 +352,21 @@ class TopicChip(Widget):
     def __init__(self, topic: str, color: str, **kwargs):
         super().__init__(**kwargs)
         self.can_focus = True
-        self._topic = topic
+        self._topic = topic   # stored as "topic::field"
         self._color = color
 
     def render(self) -> Text:
         t = Text(no_wrap=True)
         t.append("━ ", style=Style(color=self._color))
-        label = self._topic.split("/")[-1] or self._topic
+        # _topic is "topic::field" — show as "short_topic.field"
+        if "::" in self._topic:
+            topic_part, field_part = self._topic.split("::", 1)
+            short = (topic_part.split("/")[-1] or topic_part)
+            label = f"{short}.{field_part}"
+        else:
+            label = self._topic.split("/")[-1] or self._topic
         t.append(label, style=Style(color=self._color, bold=self.has_focus))
-        t.append(
-            " [×]",
-            style=Style(color="bright_red" if self.has_focus else "grey42"))
+        t.append(" [×]", style=Style(color="bright_red" if self.has_focus else "grey42"))
         return t
 
     def on_focus(self) -> None:
@@ -348,9 +394,8 @@ class TopicChip(Widget):
 
 class PinnedTopicsBar(Widget):
     """
-    Horizontal row of TopicChips. Plain Widget — ScrollableContainer swallows
-    key events in Textual 0.82 before chips see them.
-    Surgical DOM updates preserve focus across 1Hz refresh ticks.
+    Row of TopicChips.  ←/→ to move focus, Del/x/click-focused to unpin.
+    Hint shown when empty.
     """
 
     DEFAULT_CSS = """
@@ -365,7 +410,6 @@ class PinnedTopicsBar(Widget):
     """
 
     class UnpinRequested(Message):
-
         def __init__(self, topic: str) -> None:
             super().__init__()
             self.topic = topic
@@ -377,52 +421,45 @@ class PinnedTopicsBar(Widget):
     def set_chips(self, items: List[Tuple[str, str]]) -> None:
         new_topics = [t for t, _ in items]
         if new_topics == self._current_topics:
-            return  # Nothing changed — skip entirely, focus preserved
+            return  # Nothing changed — skip DOM, preserve focus
 
         focused = self.app.focused
-        focused_topic: Optional[str] = (focused._topic if isinstance(
-            focused, TopicChip) else None)
+        focused_topic: Optional[str] = (
+            focused._topic if isinstance(focused, TopicChip) else None
+        )
 
         self._current_topics = new_topics
         new_set = set(new_topics)
 
-        # Remove stale chips
         for chip in list(self.query(TopicChip)):
             if chip._topic not in new_set:
                 chip.remove()
-
-        # Remove empty hint if present
         try:
             self.query_one("#no_topics_hint").remove()
         except NoMatches:
             pass
 
         if not items:
-            self.mount(
-                Static(
-                    "[dim]No topics pinned — search above to pin[/dim]",
-                    id="no_topics_hint",
-                ))
+            self.mount(Static(
+                "[dim]No topics pinned — Ctrl+U to search[/dim]",
+                id="no_topics_hint",
+            ))
             return
 
-        # Add only newly pinned chips
         existing = {c._topic for c in self.query(TopicChip)}
-        for topic, color in items:
-            if topic not in existing:
-                chip_id = "chip_" + topic.replace("/", "__").replace(".", "_")
-                self.mount(TopicChip(topic, color, id=chip_id))
+        for key, color in items:
+            if key not in existing:
+                chip_id = "chip_" + key.replace("/", "__").replace(".", "_").replace(":", "_")
+                self.mount(TopicChip(key, color, id=chip_id))
 
-        # Restore focus
         if focused_topic and focused_topic in new_set:
-            chip_id = "#chip_" + focused_topic.replace("/", "__").replace(
-                ".", "_")
+            chip_id = "#chip_" + focused_topic.replace("/", "__").replace(".", "_").replace(":", "_")
             try:
                 self.query_one(chip_id, TopicChip).focus()
             except NoMatches:
                 pass
 
-    def on_topic_chip_unpin_requested(self,
-                                      event: TopicChip.UnpinRequested) -> None:
+    def on_topic_chip_unpin_requested(self, event: TopicChip.UnpinRequested) -> None:
         self.post_message(self.UnpinRequested(event.topic))
         event.stop()
 
@@ -474,8 +511,7 @@ class PlotCanvas(Static):
 
     def get_pinned_with_colors(self) -> List[Tuple[str, str]]:
         series = self._store.snapshot_plot(window_seconds=self._window)
-        return [(t, _COLORS[i % len(_COLORS)])
-                for i, t in enumerate(series.keys())]
+        return [(t, _COLORS[i % len(_COLORS)]) for i, t in enumerate(series.keys())]
 
 
 # ---------------------------------------------------------------------------
@@ -494,21 +530,24 @@ class VarianceTable(Static):
                 Text(
                     "  Param change markers will appear as vertical lines on the plot",
                     style="dim",
-                ))
+                )
+            )
             return
         last = markers[-1]
         mt = last.timestamp
         parts = Text()
         parts.append(f"Δ {last.param}", style="bold cyan")
-        parts.append(f"  {last.old_value} → {last.new_value}   ",
-                     style="white")
+        parts.append(f"  {last.old_value} → {last.new_value}   ", style="white")
         for topic, points in series.items():
             before = [p.value for p in points if p.timestamp < mt]
             after = [p.value for p in points if p.timestamp >= mt]
 
             def var(v):
-                return (sum((x - sum(v) / len(v))**2
-                            for x in v) / len(v) if len(v) > 1 else 0.0)
+                return (
+                    sum((x - sum(v) / len(v)) ** 2 for x in v) / len(v)
+                    if len(v) > 1
+                    else 0.0
+                )
 
             vb, va = var(before), var(after)
             d = va - vb
@@ -549,9 +588,9 @@ class PlotPanel(Widget):
     def compose(self) -> ComposeResult:
         with Horizontal(id="controls_row"):
             yield TopicSearchBar(self._store, id="topic_search")
-            yield Button(f"Window {self._window}s Ctrl+W",
-                         id="window_btn",
-                         variant="default")
+            yield Button(
+                f"Window {self._window}s Ctrl+W", id="window_btn", variant="default"
+            )
         yield PinnedTopicsBar(id="pinned_bar")
         yield PlotCanvas(self._store, id="plot_canvas")
         yield VarianceTable(id="variance_table")
@@ -559,33 +598,35 @@ class PlotPanel(Widget):
     def on_mount(self) -> None:
         self.set_interval(1.0, self._refresh)
 
-    def on_key(self, event) -> None:
-        import sys
-
-        print(
-            f"[PlotPanel] key={event.key} focused={type(self.app.focused).__name__}",
-            file=sys.stderr,
-            flush=True,
-        )
-
     # -----------------------------------------------------------------------
     # Events
     # -----------------------------------------------------------------------
 
-    def on_topic_search_bar_selected(self,
-                                     event: TopicSearchBar.Selected) -> None:
-        if self._bridge:
-            self._bridge.pin_plot_topic(event.topic)
+    def on_topic_search_bar_selected(self, event: TopicSearchBar.Selected) -> None:
+        # event.topic_key is "topic::field"
+        topic_key = event.topic_key
+        if "::" in topic_key:
+            topic, field = topic_key.split("::", 1)
         else:
-            self._store.add_plot_topic(event.topic)
+            topic, field = topic_key, "data"
+        if self._bridge:
+            self._bridge.pin_plot_topic(topic, field)
+        else:
+            self._store.add_plot_topic(topic, field)
         self.query_one("#topic_search", TopicSearchBar).clear_input()
 
     def on_pinned_topics_bar_unpin_requested(
             self, event: PinnedTopicsBar.UnpinRequested) -> None:
-        if self._bridge:
-            self._bridge.unpin_plot_topic(event.topic)
+        # event.topic is the full "topic::field" key
+        key = event.topic
+        if "::" in key:
+            topic, field = key.split("::", 1)
         else:
-            self._store.remove_plot_topic(event.topic)
+            topic, field = key, None
+        if self._bridge:
+            self._bridge.unpin_plot_topic(topic, field)
+        else:
+            self._store.remove_plot_topic(topic, field)
 
     # -----------------------------------------------------------------------
     # Actions
@@ -606,8 +647,7 @@ class PlotPanel(Widget):
     def _cycle_window(self) -> None:
         self._window_idx = (self._window_idx + 1) % len(_WINDOW_OPTIONS)
         self._window = _WINDOW_OPTIONS[self._window_idx]
-        self.query_one("#window_btn",
-                       Button).label = f"Window {self._window}s Ctrl+W"
+        self.query_one("#window_btn", Button).label = f"Window {self._window}s Ctrl+W"
         self.query_one("#plot_canvas", PlotCanvas).set_window(self._window)
 
     # -----------------------------------------------------------------------
@@ -624,5 +664,6 @@ class PlotPanel(Widget):
 
         series = self._store.snapshot_plot(window_seconds=self._window)
         markers = self._store.snapshot_param_changes()
-        self.query_one("#variance_table",
-                       VarianceTable).refresh_variance(series, markers)
+        self.query_one("#variance_table", VarianceTable).refresh_variance(
+            series, markers
+        )

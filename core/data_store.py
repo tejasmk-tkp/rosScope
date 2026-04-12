@@ -116,8 +116,10 @@ class DataStore:
         self._params: Dict[str, Dict[str, ParamSnapshot]] = {}
         self._param_change_history: deque = deque(maxlen=200)
 
-        # Plot series: {topic_name: _PlotSeries}
+        # Plot series: {"topic::field": _PlotSeries}
         self._plot_series: Dict[str, _PlotSeries] = {}
+        # Available fields per topic: {topic: [field_path, ...]}
+        self._topic_fields: Dict[str, List[str]] = {}
 
         # Log lines from /rosout
         self._log_lines: deque = deque(maxlen=500)
@@ -150,13 +152,19 @@ class DataStore:
         with self._lock:
             self._param_change_history.append(marker)
 
-    def append_plot_point(self, topic: str, timestamp: float, value: float) -> None:
+    def append_plot_point(self, topic: str, field: str, timestamp: float, value: float) -> None:
+        key = f"{topic}::{field}"
         with self._lock:
-            if topic not in self._plot_series:
-                self._plot_series[topic] = _PlotSeries(topic=topic)
-            self._plot_series[topic].points.append(
+            if key not in self._plot_series:
+                self._plot_series[key] = _PlotSeries(topic=topic)
+            self._plot_series[key].points.append(
                 PlotPoint(timestamp=timestamp, value=value)
             )
+
+    def update_topic_fields(self, topic: str, fields: List[str]) -> None:
+        """Register available numeric field paths for a topic."""
+        with self._lock:
+            self._topic_fields[topic] = list(fields)
 
     def append_log_line(self, line: str) -> None:
         with self._lock:
@@ -166,15 +174,22 @@ class DataStore:
         with self._lock:
             self._ros_connected = connected
 
-    def add_plot_topic(self, topic: str) -> None:
-        """Pin a topic to the plot panel."""
+    def add_plot_topic(self, topic: str, field: str = "data") -> None:
+        """Pin a topic+field to the plot panel."""
+        key = f"{topic}::{field}"
         with self._lock:
-            if topic not in self._plot_series:
-                self._plot_series[topic] = _PlotSeries(topic=topic)
+            if key not in self._plot_series:
+                self._plot_series[key] = _PlotSeries(topic=topic)
 
-    def remove_plot_topic(self, topic: str) -> None:
+    def remove_plot_topic(self, topic: str, field: Optional[str] = None) -> None:
         with self._lock:
-            self._plot_series.pop(topic, None)
+            if field is not None:
+                self._plot_series.pop(f"{topic}::{field}", None)
+            else:
+                # Remove all fields for this topic
+                keys = [k for k in self._plot_series if k.startswith(f"{topic}::")]
+                for k in keys:
+                    del self._plot_series[k]
 
     # -----------------------------------------------------------------------
     # Read API (called from TUI thread — returns copies, never live objects)
@@ -238,9 +253,19 @@ class DataStore:
             return result
 
     def snapshot_plot_topics(self) -> List[str]:
-        """Currently pinned plot topics."""
+        """Currently pinned plot topic keys ("topic::field" format)."""
         with self._lock:
             return list(self._plot_series.keys())
+
+    def snapshot_topic_fields(self, topic: str) -> List[str]:
+        """Available numeric field paths for a topic."""
+        with self._lock:
+            return list(self._topic_fields.get(topic, []))
+
+    def snapshot_all_topic_fields(self) -> Dict[str, List[str]]:
+        """All known topic -> fields mappings."""
+        with self._lock:
+            return {t: list(f) for t, f in self._topic_fields.items()}
 
     def snapshot_param_changes(self) -> List[ParamChangeMarker]:
         """All parameter change markers (for plot overlay)."""
@@ -266,6 +291,8 @@ class DataStore:
         with self._lock:
             return self._ros_connected
 
-    def is_plot_topic_pinned(self, topic: str) -> bool:
+    def is_plot_topic_pinned(self, topic: str, field: Optional[str] = None) -> bool:
         with self._lock:
-            return topic in self._plot_series
+            if field is not None:
+                return f"{topic}::{field}" in self._plot_series
+            return any(k.startswith(f"{topic}::") for k in self._plot_series)

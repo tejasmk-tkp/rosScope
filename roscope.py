@@ -221,10 +221,15 @@ def _inject_demo_data(store: DataStore) -> None:
                 "acc_lim_x":         ParamSnapshot("/controller_server", "acc_lim_x",         2.5,  "float"),
                 "xy_goal_tolerance": ParamSnapshot("/controller_server", "xy_goal_tolerance", 0.05, "float"),
             })
-            store.add_plot_topic("/cmd_vel")
-            store.add_plot_topic("/odom")
-            store.append_plot_point("/cmd_vel", time.monotonic(), 0.5 * _math.sin(t * 0.5))
-            store.append_plot_point("/odom",    time.monotonic(), 0.3 * _math.cos(t * 0.3))
+            store.add_plot_topic("/cmd_vel", "linear.x")
+            store.add_plot_topic("/cmd_vel", "angular.z")
+            store.add_plot_topic("/odom",    "twist.twist.linear.x")
+            store.update_topic_fields("/cmd_vel", ["linear.x", "linear.y", "linear.z", "angular.x", "angular.y", "angular.z"])
+            store.update_topic_fields("/odom",    ["twist.twist.linear.x", "twist.twist.angular.z", "pose.pose.position.x", "pose.pose.position.y"])
+            store.update_topic_fields("/scan",    ["angle_min", "angle_max", "range_min", "range_max"])
+            store.append_plot_point("/cmd_vel", "linear.x",              time.monotonic(), 0.5 * _math.sin(t * 0.5))
+            store.append_plot_point("/cmd_vel", "angular.z",             time.monotonic(), 0.3 * _math.cos(t * 0.4))
+            store.append_plot_point("/odom",    "twist.twist.linear.x",  time.monotonic(), 0.5 * _math.sin(t * 0.5) * 0.9 + 0.02 * _math.sin(t * 3))
             t += 1.0
             time.sleep(1.0)
 
