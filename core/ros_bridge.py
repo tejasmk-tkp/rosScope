@@ -651,8 +651,20 @@ class RosBridge:
             log.warning(f"no ros__parameters found for {ros_node}, keys={list(data.keys())}")
             return
 
+        def _flatten(d: dict, prefix: str = "") -> Dict[str, Any]:
+            """Recursively flatten nested param dicts into dot-notation keys."""
+            out: Dict[str, Any] = {}
+            for k, v in d.items():
+                full_key = f"{prefix}.{k}" if prefix else k
+                if isinstance(v, dict):
+                    out.update(_flatten(v, full_key))
+                else:
+                    out[full_key] = v
+            return out
+
+        flat = _flatten(params_dict)
         snapshots: Dict[str, ParamSnapshot] = {}
-        for pname, pval in params_dict.items():
+        for pname, pval in flat.items():
             snapshots[pname] = ParamSnapshot(
                 node=ros_node, name=pname,
                 value=pval, type_name=type(pval).__name__,
