@@ -74,7 +74,7 @@ class ParamTunerPanel(Widget):
         self._history: List[tuple] = []
         self._ck: dict = {}
         self._suppress_select: bool = False
-        self._suppress_select: bool = False  # guard against spurious select events
+        self._known_nodes: List[str] = []  # last list pushed to Select — skip set_options if unchanged
 
     def compose(self) -> ComposeResult:
         yield Select([], prompt="Select a node… (Tab to reach)", id="node_select")
@@ -122,13 +122,15 @@ class ParamTunerPanel(Widget):
         live = [n.name for n in self._store.snapshot_nodes()]
         cached = self._store.snapshot_param_nodes()
         all_nodes = sorted(set(live + cached))
+        if all_nodes == self._known_nodes:
+            return  # nothing changed — don't touch the widget, preserves scroll position
+        self._known_nodes = all_nodes
         sel = self.query_one("#node_select", Select)
-        current = self._selected_node
         self._suppress_select = True
         try:
             sel.set_options([(n, n) for n in all_nodes])
-            if current and current in all_nodes:
-                sel.value = current
+            if self._selected_node and self._selected_node in all_nodes:
+                sel.value = self._selected_node
         finally:
             self._suppress_select = False
 
