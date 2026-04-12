@@ -137,6 +137,41 @@ class RosBridge:
     def unpin_plot_topic(self, topic: str) -> None:
         self._store.remove_plot_topic(topic)
 
+    def list_services(self) -> None:
+        """Refresh service list — queued for spin thread."""
+        self._param_set_queue.put(("__list_services__", None, None, None))
+
+    def publish_topic(self, topic: str, msg_type_str: str,
+                      field_values: dict, on_done=None) -> None:
+        """Publish a single message to a topic."""
+        self._param_set_queue.put(
+            ("__pub__", topic, (msg_type_str, field_values), on_done)
+        )
+
+    def call_service(self, service: str, srv_type_str: str,
+                     field_values: dict, on_done=None) -> None:
+        """Call a service with given request fields."""
+        self._param_set_queue.put(
+            ("__srv__", service, (srv_type_str, field_values), on_done)
+        )
+
+    def get_msg_fields(self, msg_type_str: str) -> List[dict]:
+        """Synchronously introspect message fields. Returns list of field dicts."""
+        msg_class = self._import_msg_type(msg_type_str)
+        if msg_class is None:
+            return []
+        return self._describe_fields(msg_class())
+
+    def get_srv_fields(self, srv_type_str: str) -> List[dict]:
+        """Synchronously introspect service request fields."""
+        srv_class = self._import_srv_type(srv_type_str)
+        if srv_class is None:
+            return []
+        try:
+            return self._describe_fields(srv_class.Request())
+        except Exception:
+            return []
+
     def fetch_params(self, ros_node: str) -> None:
         """
         Request a param refresh for a node.
@@ -235,10 +270,14 @@ class RosBridge:
         try:
             node_names = self._get_node_names()
             self._resource_monitor.update(node_names)
-            self._store.update_node_resources(
-                self._resource_monitor.all_nodes(),
-                self._resource_monitor.system,
-            )
+            all_nodes = self._resource_monitor.all_nodes()
+            self._store.update_node_resources(all_nodes, self._resource_monitor.system)
+            # Feed node plot history
+            now = time.monotonic()
+            for name, res in all_nodes.items():
+                self._store.append_node_resource_point(
+                    name, now, res.cpu_percent, res.memory_mb
+                )
         except Exception as e:
             log.debug(f"Resource tick error: {e}")
 
@@ -246,6 +285,7 @@ class RosBridge:
         """2Hz — discover topics, measure frequencies, detect QoS issues."""
         try:
             self._discover_topics()
+            self._do_list_services()
             self._refresh_plot_subscriptions()
         except Exception as e:
             log.debug(f"Discovery tick error: {e}")
@@ -258,8 +298,13 @@ class RosBridge:
                 action, node, value, cb = item
 
                 if action == "__fetch__":
-                    # node field holds the ros node name when fetching
                     self._do_fetch_params(node)
+                elif action == "__list_services__":
+                    self._do_list_services()
+                elif action == "__pub__":
+                    self._do_publish(node, value[0], value[1], cb)
+                elif action == "__srv__":
+                    self._do_call_service(node, value[0], value[1], cb)
                 else:
                     self._do_set_param(action, node, value, cb)
 
@@ -594,6 +639,125 @@ class RosBridge:
     # -----------------------------------------------------------------------
     # /rosout callback
     # -----------------------------------------------------------------------
+
+    def _do_list_services(self) -> None:
+        if self._node is None:
+            return
+        try:
+            from .data_store import ServiceSnapshot
+            svc_list = self._node.get_service_names_and_types()
+            services = {
+                name: ServiceSnapshot(name=name, srv_type=types[0] if types else "unknown")
+                for name, types in svc_list
+            }
+            self._store.update_services(services)
+        except Exception as e:
+            log.debug(f"Service discovery error: {e}")
+
+    def _do_publish(self, topic: str, msg_type_str: str,
+                    field_values: dict, on_done) -> None:
+        try:
+            msg_class = self._import_msg_type(msg_type_str)
+            if msg_class is None:
+                if on_done: on_done(False, f"Unknown type: {msg_type_str}")
+                return
+            msg = msg_class()
+            self._set_msg_fields(msg, field_values)
+            pub = self._node.create_publisher(msg_class, topic, 1)
+            pub.publish(msg)
+            self._node.destroy_publisher(pub)
+            if on_done: on_done(True, "")
+        except Exception as e:
+            if on_done: on_done(False, str(e))
+
+    def _do_call_service(self, service: str, srv_type_str: str,
+                         field_values: dict, on_done) -> None:
+        try:
+            srv_class = self._import_srv_type(srv_type_str)
+            if srv_class is None:
+                if on_done: on_done(False, f"Unknown service type: {srv_type_str}", None)
+                return
+            req = srv_class.Request()
+            self._set_msg_fields(req, field_values)
+            cli = self._node.create_client(srv_class, service)
+            if not cli.wait_for_service(timeout_sec=3.0):
+                if on_done: on_done(False, "Service not available", None)
+                self._node.destroy_client(cli)
+                return
+            future = cli.call_async(req)
+            # Spin until done (blocking but in spin thread so safe)
+            import rclpy
+            rclpy.spin_until_future_complete(self._node, future, timeout_sec=5.0)
+            self._node.destroy_client(cli)
+            if future.done():
+                result = future.result()
+                if on_done: on_done(True, "", str(result))
+            else:
+                if on_done: on_done(False, "Timeout", None)
+        except Exception as e:
+            if on_done: on_done(False, str(e), None)
+
+    def _import_srv_type(self, type_str: str) -> Optional[Any]:
+        import importlib
+        try:
+            parts = type_str.split("/")
+            if len(parts) != 3:
+                return None
+            pkg, _, typename = parts
+            module = importlib.import_module(f"{pkg}.srv")
+            return getattr(module, typename)
+        except (ImportError, AttributeError):
+            return None
+
+    def _describe_fields(self, obj: Any, prefix: str = "", depth: int = 0) -> List[dict]:
+        """Return list of {path, type, default} for all leaf fields of a msg."""
+        if depth > 4:
+            return []
+        fields = []
+        slots = getattr(obj, "__slots__", None) or []
+        for slot in slots:
+            attr = slot.lstrip("_")
+            try:
+                val = getattr(obj, attr, None)
+                if val is None:
+                    val = getattr(obj, slot, None)
+            except Exception:
+                continue
+            if val is None:
+                continue
+            path = f"{prefix}.{attr}" if prefix else attr
+            if isinstance(val, bool):
+                fields.append({"path": path, "type": "bool", "default": val})
+            elif isinstance(val, int):
+                fields.append({"path": path, "type": "int", "default": val})
+            elif isinstance(val, float):
+                fields.append({"path": path, "type": "float", "default": val})
+            elif isinstance(val, str):
+                fields.append({"path": path, "type": "str", "default": val})
+            elif hasattr(val, "__slots__"):
+                fields.extend(self._describe_fields(val, path, depth + 1))
+        return fields
+
+    def _set_msg_fields(self, msg: Any, field_values: dict) -> None:
+        """Set fields on a message by dot-path dict."""
+        for path, raw_val in field_values.items():
+            parts = path.split(".")
+            obj = msg
+            try:
+                for part in parts[:-1]:
+                    obj = getattr(obj, part)
+                leaf = parts[-1]
+                current = getattr(obj, leaf)
+                if isinstance(current, bool):
+                    setattr(obj, leaf, str(raw_val).lower() in ("true", "1", "yes"))
+                elif isinstance(current, int):
+                    setattr(obj, leaf, int(float(raw_val)))
+                elif isinstance(current, float):
+                    setattr(obj, leaf, float(raw_val))
+                else:
+                    setattr(obj, leaf, str(raw_val))
+            except Exception as e:
+                log.debug(f"set_msg_fields error on {path}: {e}")
 
     def _on_tf_msg(self, msg: Any, is_static: bool) -> None:
         """Handle /tf and /tf_static messages — update staleness tracker."""

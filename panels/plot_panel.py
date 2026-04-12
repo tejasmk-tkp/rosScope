@@ -11,7 +11,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from textual.app import ComposeResult
 from textual.widget import Widget
-from textual.widgets import Static, Input, Button, OptionList
+from textual.widgets import Static, Input, Button, OptionList, Select
 from textual.widgets._option_list import Option
 from textual.containers import Horizontal, Vertical
 from textual.binding import Binding
@@ -40,6 +40,7 @@ _COLORS = [
     "white",
 ]
 _WINDOW_OPTIONS = [10, 30, 60, 120, 300]
+_PLOT_MODES = ["Topics", "CPU", "Memory"]
 
 
 def _make_canvas(w: int, h: int) -> List[List[int]]:
@@ -498,19 +499,35 @@ class PlotCanvas(Static):
         super().__init__("", **kwargs)
         self._store = store
         self._window = 30
+        self._mode = "Topics"   # "Topics" | "CPU" | "Memory"
 
     def set_window(self, w: int) -> None:
         self._window = w
 
+    def set_mode(self, mode: str) -> None:
+        self._mode = mode
+
     def refresh_plot(self) -> None:
-        series = self._store.snapshot_plot(window_seconds=self._window)
-        markers = self._store.snapshot_param_changes()
         cw = max(self.size.width, 10)
         ch = max(self.size.height, 4)
-        self.update(render_plot_text(series, markers, self._window, cw, ch))
+        if self._mode == "Topics":
+            series = self._store.snapshot_plot(window_seconds=self._window)
+            markers = self._store.snapshot_param_changes()
+            self.update(render_plot_text(series, markers, self._window, cw, ch))
+        else:
+            mode_key = "cpu" if self._mode == "CPU" else "mem_mb"
+            series = self._store.snapshot_node_plot(mode_key,
+                                                     window_seconds=self._window)
+            markers = []
+            self.update(render_plot_text(series, markers, self._window, cw, ch))
 
     def get_pinned_with_colors(self) -> List[Tuple[str, str]]:
-        series = self._store.snapshot_plot(window_seconds=self._window)
+        if self._mode == "Topics":
+            series = self._store.snapshot_plot(window_seconds=self._window)
+        else:
+            mode_key = "cpu" if self._mode == "CPU" else "mem_mb"
+            series = self._store.snapshot_node_plot(mode_key,
+                                                     window_seconds=self._window)
         return [(t, _COLORS[i % len(_COLORS)]) for i, t in enumerate(series.keys())]
 
 
@@ -576,6 +593,7 @@ class PlotPanel(Widget):
     }
     #controls_row Button { width: auto; margin-left: 1; }
     #window_btn { width: 20; }
+    #mode_select { width: 14; margin-right: 1; }
     """
 
     def __init__(self, store: DataStore, bridge, **kwargs):
@@ -584,9 +602,16 @@ class PlotPanel(Widget):
         self._bridge = bridge
         self._window_idx = 1
         self._window = _WINDOW_OPTIONS[self._window_idx]
+        self._mode = "Topics"
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="controls_row"):
+            yield Select(
+                [("Topics", "Topics"), ("CPU", "CPU"), ("Memory", "Memory")],
+                value="Topics",
+                id="mode_select",
+                allow_blank=False,
+            )
             yield TopicSearchBar(self._store, id="topic_search")
             yield Button(
                 f"Window {self._window}s Ctrl+W", id="window_btn", variant="default"
@@ -601,6 +626,16 @@ class PlotPanel(Widget):
     # -----------------------------------------------------------------------
     # Events
     # -----------------------------------------------------------------------
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "mode_select" and event.value != Select.BLANK:
+            mode = str(event.value)
+            self._mode = mode
+            canvas = self.query_one("#plot_canvas", PlotCanvas)
+            canvas.set_mode(mode)
+            # Show/hide topic search based on mode
+            search = self.query_one("#topic_search", TopicSearchBar)
+            search.display = (mode == "Topics")
 
     def on_topic_search_bar_selected(self, event: TopicSearchBar.Selected) -> None:
         # event.topic_key is "topic::field"

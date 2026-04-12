@@ -65,23 +65,26 @@ def _render_dynamic_tree(
     if not transforms:
         return Text("  No dynamic transforms received yet", style="dim")
 
-    tf_map: Dict[Tuple[str, str], TFTransform] = {
-        (t.parent, t.child): t for t in transforms
-    }
     children, all_children = _build_tree(transforms)
-
-    # Roots = frames that appear as parent but never as child
     all_parents = set(children.keys())
     roots = sorted(all_parents - all_children)
     if not roots:
-        # Fallback: pick the most common parent
         counts = {p: len(c) for p, c in children.items()}
         roots = [max(counts, key=counts.get)]
 
+    # Map child -> transform for quick lookup
+    child_tf: Dict[str, TFTransform] = {t.child: t for t in transforms}
+
     result = Text()
 
+    def _get_age_s(tf: TFTransform) -> Tuple[float, bool]:
+        """Returns (age_seconds, is_stamp_based).
+        Uses ROS stamp age if available, falls back to wall-clock last_received age."""
+        if tf.stamp_age_s >= 0:
+            return tf.stamp_age_s, True
+        return now - tf.last_received, False
+
     def _age_style(age_s: float) -> Tuple[str, str]:
-        """Returns (color, age_label)."""
         age_ms = age_s * 1000
         label = f"{age_ms:6.1f}ms"
         if age_ms < warn_ms:
@@ -89,28 +92,23 @@ def _render_dynamic_tree(
         elif age_ms < error_ms:
             return "yellow", label
         else:
-            return "bold bright_red", label
+            return "bright_red", label
 
     def _walk(frame: str, prefix: str, is_last: bool) -> None:
         connector = "└── " if is_last else "├── "
         extension = "    " if is_last else "│   "
-
         result.append(prefix + connector, style="bright_black")
 
-        # Find the transform that produced this frame as child
-        parent_tf = None
-        for tf in transforms:
-            if tf.child == frame:
-                parent_tf = tf
-                break
-
-        if parent_tf is not None:
-            age_s = now - parent_tf.last_update
+        tf = child_tf.get(frame)
+        if tf is not None:
+            age_s, stamp_based = _get_age_s(tf)
             color, age_label = _age_style(age_s)
-            frame_style = ("bold " + color) if (age_s * 1000 >= error_ms) else color
+            is_stale = age_s * 1000 >= error_ms
+            frame_style = ("bold " + color) if is_stale else color
             result.append(frame, style=frame_style)
-            result.append(f"  [{age_label}]", style=color)
-            if age_s * 1000 >= error_ms:
+            age_source = "stamp" if stamp_based else "recv"
+            result.append(f"  [{age_label} {age_source}]", style=color)
+            if is_stale:
                 result.append(" ✗ STALE", style="bold bright_red")
             elif age_s * 1000 >= warn_ms:
                 result.append(" ⚠", style="yellow")
@@ -118,7 +116,6 @@ def _render_dynamic_tree(
             result.append(frame, style="cyan")  # root frame
 
         result.append("\n")
-
         kids = sorted(children.get(frame, []))
         for i, kid in enumerate(kids):
             _walk(kid, prefix + extension, i == len(kids) - 1)
@@ -328,11 +325,14 @@ class TFTreePanel(Widget):
         self.query_one("#static_tree",  StaticTreeView).update(sta_text)
 
         # Update dynamic header with summary counts
-        total   = len(dynamic)
-        stale   = sum(1 for t in dynamic
-                      if (now - t.last_update) * 1000 >= self._error_ms)
-        warn    = sum(1 for t in dynamic
-                      if self._warn_ms <= (now - t.last_update) * 1000 < self._error_ms)
+        def _age_ms(t: "TFTransform") -> float:
+            if t.stamp_age_s >= 0:
+                return t.stamp_age_s * 1000
+            return (now - t.last_received) * 1000
+
+        total = len(dynamic)
+        stale = sum(1 for t in dynamic if _age_ms(t) >= self._error_ms)
+        warn  = sum(1 for t in dynamic if self._warn_ms <= _age_ms(t) < self._error_ms)
 
         if stale:
             status = f"[bold bright_red] {stale} STALE[/bold bright_red]"

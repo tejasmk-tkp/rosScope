@@ -47,6 +47,12 @@ class TopicSnapshot:
 
 
 @dataclass(frozen=True)
+class ServiceSnapshot:
+    name: str
+    srv_type: str
+
+
+@dataclass(frozen=True)
 class ParamSnapshot:
     node: str
     name: str
@@ -73,7 +79,8 @@ class ParamChangeMarker:
 class TFTransform:
     parent: str
     child: str
-    last_update: float      # time.monotonic() of last received transform
+    stamp_age_s: float      # age = ros_now - header.stamp (s); -1 if unknown/static
+    last_received: float    # time.monotonic() of last received msg
     is_static: bool         # from /tf_static
     publisher_node: str     # best-effort, may be empty
 
@@ -121,6 +128,12 @@ class DataStore:
         # Topics
         self._topics: Dict[str, TopicSnapshot] = {}
 
+        # Services
+        self._services: Dict[str, ServiceSnapshot] = {}
+
+        # Node resource history for plot panel
+        self._node_plot_history: Dict[str, Any] = {}
+
         # Parameters: {node_name: {param_name: ParamSnapshot}}
         self._params: Dict[str, Dict[str, ParamSnapshot]] = {}
         self._param_change_history: deque = deque(maxlen=200)
@@ -155,6 +168,18 @@ class DataStore:
         with self._lock:
             self._topics = dict(topics)
 
+    def update_services(self, services: Dict[str, "ServiceSnapshot"]) -> None:
+        with self._lock:
+            self._services = dict(services)
+
+    def append_node_resource_point(self, node: str, timestamp: float,
+                                    cpu: float, mem_mb: float) -> None:
+        from collections import deque as _deque
+        with self._lock:
+            if node not in self._node_plot_history:
+                self._node_plot_history[node] = _deque(maxlen=600)
+            self._node_plot_history[node].append((timestamp, cpu, mem_mb))
+
     def update_params(self, node: str, params: Dict[str, ParamSnapshot]) -> None:
         with self._lock:
             self._params[node] = dict(params)
@@ -171,9 +196,9 @@ class DataStore:
                 PlotPoint(timestamp=timestamp, value=value)
             )
 
-    def append_log_line(self, line: str) -> None:
+    def append_log_line(self, line: str, level: str = "INFO") -> None:
         with self._lock:
-            self._log_lines.append((time.monotonic(), line))
+            self._log_lines.append((time.monotonic(), level, line))
 
     def set_ros_connected(self, connected: bool) -> None:
         with self._lock:
@@ -226,6 +251,23 @@ class DataStore:
         with self._lock:
             return sorted(self._topics.values(), key=lambda t: t.name)
 
+    def snapshot_services(self) -> List["ServiceSnapshot"]:
+        with self._lock:
+            return sorted(self._services.values(), key=lambda s: s.name)
+
+    def snapshot_node_plot(self, mode: str, window_seconds: float = 30.0):
+        cutoff = time.monotonic() - window_seconds
+        with self._lock:
+            result = {}
+            for node, history in self._node_plot_history.items():
+                pts = []
+                for ts, cpu, mem in history:
+                    if ts >= cutoff:
+                        val = cpu if mode == "cpu" else mem
+                        pts.append(PlotPoint(timestamp=ts, value=val))
+                result[node] = pts
+            return result
+
     def snapshot_params(self, node: str) -> List[ParamSnapshot]:
         with self._lock:
             return list(self._params.get(node, {}).values())
@@ -260,11 +302,19 @@ class DataStore:
         with self._lock:
             return list(self._param_change_history)
 
-    def update_tf(self, parent: str, child: str, timestamp: float,
-                  is_static: bool = False, publisher_node: str = "") -> None:
+    def update_tf(self, parent: str, child: str,
+                  stamp_age_s: float = -1.0,
+                  last_received: Optional[float] = None,
+                  is_static: bool = False,
+                  publisher_node: str = "") -> None:
         key = (parent, child)
-        tf = TFTransform(parent=parent, child=child, last_update=timestamp,
-                         is_static=is_static, publisher_node=publisher_node)
+        tf = TFTransform(
+            parent=parent, child=child,
+            stamp_age_s=stamp_age_s,
+            last_received=last_received if last_received is not None else time.monotonic(),
+            is_static=is_static,
+            publisher_node=publisher_node,
+        )
         with self._lock:
             if is_static:
                 self._tf_static[key] = tf
@@ -278,16 +328,29 @@ class DataStore:
 
     def snapshot_logs(self,
                       node_filter: Optional[str] = None,
+                      level_filter: Optional[str] = None,
                       keyword_filter: Optional[str] = None,
-                      max_lines: int = 100) -> List[Tuple[float, str]]:
+                      max_lines: int = 500) -> List[Tuple[float, str, str]]:
+        """Returns list of (timestamp, level, line)."""
         with self._lock:
             lines = list(self._log_lines)
 
+        # Normalise old 2-tuple entries from before the level field was added
+        normalised = []
+        for entry in lines:
+            if len(entry) == 2:
+                normalised.append((entry[0], "INFO", entry[1]))
+            else:
+                normalised.append(entry)
+        lines = normalised
+
         if node_filter:
-            lines = [(t, l) for t, l in lines if node_filter in l]
+            lines = [(t, lv, l) for t, lv, l in lines if node_filter in l]
+        if level_filter and level_filter != "ALL":
+            lines = [(t, lv, l) for t, lv, l in lines if lv == level_filter]
         if keyword_filter:
             kw = keyword_filter.lower()
-            lines = [(t, l) for t, l in lines if kw in l.lower()]
+            lines = [(t, lv, l) for t, lv, l in lines if kw in l.lower()]
 
         return lines[-max_lines:]
 

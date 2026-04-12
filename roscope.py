@@ -26,6 +26,8 @@ from panels.node_overview import NodeOverviewPanel
 from panels.topic_monitor import TopicMonitorPanel
 from panels.param_tuner import ParamTunerPanel
 from panels.tf_tree import TFTreePanel
+from panels.rosout import RosoutPanel
+from panels.interactor import InteractorPanel
 from panels.plot_panel import PlotPanel
 
 
@@ -94,6 +96,8 @@ class RosScope(App):
         Binding("2", "switch_tab('tab_topics')", "Topics", show=True),
         Binding("3", "switch_tab('tab_params')", "Params", show=True),
         Binding("4", "switch_tab('tab_tf')",     "TF",     show=True),
+        Binding("5", "switch_tab('tab_log')",     "Log",    show=True),
+        Binding("6", "switch_tab('tab_interact')", "Pub/Srv", show=True),
     ]
 
     def __init__(self, store: DataStore, bridge: RosBridge, **kwargs):
@@ -114,6 +118,10 @@ class RosScope(App):
                 yield ParamTunerPanel(self._store, self._bridge)
             with TabPane("TF [4]", id="tab_tf"):
                 yield TFTreePanel(self._store)
+            with TabPane("Log [5]", id="tab_log"):
+                yield RosoutPanel(self._store)
+            with TabPane("Interact [6]", id="tab_interact"):
+                yield InteractorPanel(self._store, self._bridge)
         yield Footer()
 
     def action_focus_toggle(self) -> None:
@@ -227,24 +235,56 @@ def _inject_demo_data(store: DataStore) -> None:
             })
             store.add_plot_topic("/cmd_vel")
             store.add_plot_topic("/odom")
+            # Node resource plot history
+            now2 = time.monotonic()
+            for nname, nr in nodes.items():
+                store.append_node_resource_point(nname, now2, nr.cpu_percent, nr.memory_mb)
+            # Feed node resource plot history
+            now2 = time.monotonic()
+            for nname, nr in nodes.items():
+                store.append_node_resource_point(nname, now2, nr.cpu_percent, nr.memory_mb)
             store.append_plot_point("/cmd_vel", time.monotonic(), 0.5 * _math.sin(t * 0.5))
             store.append_plot_point("/odom",    time.monotonic(), 0.3 * _math.cos(t * 0.3))
             # Demo TF tree
             now = time.monotonic()
             # Dynamic TFs — simulate ZED going stale after t=30
             zed_age = 0.05 if t < 30 else (t - 30) * 0.1 + 0.05
-            store.update_tf("map",         "odom",             now - 0.04)
-            store.update_tf("odom",        "base_link",        now - 0.03)
-            store.update_tf("base_link",   "laser_frame",      now - 0.04)
-            store.update_tf("base_link",   "zed_camera_link",  now - zed_age)
-            store.update_tf("zed_camera_link", "zed_left_camera_frame",  now - zed_age)
-            store.update_tf("zed_camera_link", "zed_right_camera_frame", now - zed_age)
-            store.update_tf("base_link",   "imu_link",         now - 0.02)
+            store.update_tf("map",         "odom",            stamp_age_s=0.040)
+            store.update_tf("odom",        "base_link",        stamp_age_s=0.030)
+            store.update_tf("base_link",   "laser_frame",      stamp_age_s=0.035)
+            store.update_tf("base_link",   "zed_camera_link",  stamp_age_s=zed_age)
+            store.update_tf("zed_camera_link", "zed_left_camera_frame",  stamp_age_s=zed_age)
+            store.update_tf("zed_camera_link", "zed_right_camera_frame", stamp_age_s=zed_age)
+            store.update_tf("base_link",   "imu_link",         stamp_age_s=0.020)
             # Static TFs
-            store.update_tf("base_link",   "base_footprint",   now, is_static=True)
-            store.update_tf("base_link",   "caster_wheel",     now, is_static=True)
-            store.update_tf("base_link",   "left_wheel",       now, is_static=True)
-            store.update_tf("base_link",   "right_wheel",      now, is_static=True)
+            store.update_tf("base_link",   "base_footprint",   is_static=True)
+            store.update_tf("base_link",   "caster_wheel",     is_static=True)
+            store.update_tf("base_link",   "left_wheel",       is_static=True)
+            store.update_tf("base_link",   "right_wheel",      is_static=True)
+            # Demo rosout
+            import random as _random
+            demo_logs = [
+                ("INFO",  "/controller_server", "Goal received, planning path"),
+                ("INFO",  "/planner_server",    "Path computed: 12 waypoints"),
+                ("WARN",  "/zed_node",          "Left image frame dropped"),
+                ("ERROR", "/zed_node",          "TF lookup failed: zed_camera_link"),
+                ("INFO",  "/pid_controller",    f"cmd_vel linear={0.5*_math.sin(t*0.5):.3f}"),
+                ("WARN",  "/controller_server", "Velocity limit hit"),
+                ("FATAL", "/zed_node",          "CUDA out of memory"),
+            ]
+            if int(t) % 2 == 0:
+                lvl, node_n, msg_n = demo_logs[int(t) % len(demo_logs)]
+                store.append_log_line(f"[{node_n}] {msg_n}", level=lvl)
+            # Demo services
+            from core.data_store import ServiceSnapshot
+            store.update_services({
+                "/controller_server/set_parameters": ServiceSnapshot(
+                    "/controller_server/set_parameters", "rcl_interfaces/srv/SetParameters"),
+                "/move_base/cancel": ServiceSnapshot(
+                    "/move_base/cancel", "std_srvs/srv/Trigger"),
+                "/enable_motors": ServiceSnapshot(
+                    "/enable_motors", "std_srvs/srv/SetBool"),
+            })
             t += 1.0
             time.sleep(1.0)
 
