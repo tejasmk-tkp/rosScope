@@ -128,6 +128,10 @@ class DataStore:
         # Topics
         self._topics: Dict[str, TopicSnapshot] = {}
 
+        # Known numeric fields per topic: {topic_name: [field_path, ...]}
+        # Populated by the ROS bridge when a message is first received.
+        self._topic_fields: Dict[str, List[str]] = {}
+
         # Services
         self._services: Dict[str, ServiceSnapshot] = {}
 
@@ -168,6 +172,16 @@ class DataStore:
         with self._lock:
             self._topics = dict(topics)
 
+    def update_topic_fields(self, topic: str, fields: List[str]) -> None:
+        """Record the list of plottable (numeric) field paths for a topic.
+
+        Called by the ROS bridge the first time a message arrives on *topic*.
+        ``fields`` is an ordered list of dot-separated paths, e.g.
+        ``['position.x', 'position.y', 'velocity']``.
+        """
+        with self._lock:
+            self._topic_fields[topic] = list(fields)
+
     def update_services(self, services: Dict[str, "ServiceSnapshot"]) -> None:
         with self._lock:
             self._services = dict(services)
@@ -204,15 +218,22 @@ class DataStore:
         with self._lock:
             self._ros_connected = connected
 
-    def add_plot_topic(self, topic: str) -> None:
-        """Pin a topic to the plot panel."""
-        with self._lock:
-            if topic not in self._plot_series:
-                self._plot_series[topic] = _PlotSeries(topic=topic)
+    def add_plot_topic(self, topic: str, field: str = "data") -> None:
+        """Pin a topic+field combination to the plot panel.
 
-    def remove_plot_topic(self, topic: str) -> None:
+        The key stored internally is ``"topic::field"`` so that the same topic
+        can be pinned multiple times with different fields.
+        """
+        key = f"{topic}::{field}"
         with self._lock:
-            self._plot_series.pop(topic, None)
+            if key not in self._plot_series:
+                self._plot_series[key] = _PlotSeries(topic=key)
+
+    def remove_plot_topic(self, topic: str, field: Optional[str] = None) -> None:
+        """Unpin a topic (and optional field) from the plot panel."""
+        key = f"{topic}::{field}" if field is not None else topic
+        with self._lock:
+            self._plot_series.pop(key, None)
 
     # -----------------------------------------------------------------------
     # Read API (called from TUI thread — returns copies, never live objects)
@@ -297,6 +318,17 @@ class DataStore:
         with self._lock:
             return list(self._plot_series.keys())
 
+    def snapshot_topic_fields(self, topic: str) -> List[str]:
+        """Return the known plottable field paths for *topic*.
+
+        Returns an empty list if the topic has never been subscribed to or if
+        no field metadata has been recorded yet (bridge hasn't seen a message).
+        The TUI uses this to populate the field-picker dropdown; when the list
+        is empty it falls back to the ``"data"`` default.
+        """
+        with self._lock:
+            return list(self._topic_fields.get(topic, []))
+
     def snapshot_param_changes(self) -> List[ParamChangeMarker]:
         """All parameter change markers (for plot overlay)."""
         with self._lock:
@@ -358,6 +390,15 @@ class DataStore:
         with self._lock:
             return self._ros_connected
 
-    def is_plot_topic_pinned(self, topic: str) -> bool:
+    def is_plot_topic_pinned(self, topic: str, field: Optional[str] = None) -> bool:
+        """Return True if *topic* (optionally with *field*) is currently pinned.
+
+        If *field* is given, checks for the exact ``"topic::field"`` key.
+        If *field* is omitted, returns True if *any* field of *topic* is pinned.
+        """
         with self._lock:
-            return topic in self._plot_series
+            if field is not None:
+                return f"{topic}::{field}" in self._plot_series
+            prefix = f"{topic}::"
+            return any(k == topic or k.startswith(prefix)
+                       for k in self._plot_series)

@@ -128,14 +128,14 @@ class RosBridge:
         """
         self._param_set_queue.put((node, param, value, on_done))
 
-    def pin_plot_topic(self, topic: str) -> None:
-        """Add a topic to the plot panel — bridge will subscribe to it."""
-        self._store.add_plot_topic(topic)
+    def pin_plot_topic(self, topic: str, field: str = "data") -> None:
+        """Add a topic+field to the plot panel — bridge will subscribe to it."""
+        self._store.add_plot_topic(topic, field)
         # Actual subscription happens in _refresh_plot_subscriptions()
         # which runs on the next discovery cycle inside the spin thread.
 
-    def unpin_plot_topic(self, topic: str) -> None:
-        self._store.remove_plot_topic(topic)
+    def unpin_plot_topic(self, topic: str, field: Optional[str] = None) -> None:
+        self._store.remove_plot_topic(topic, field)
 
     def list_services(self) -> None:
         """Refresh service list — queued for spin thread."""
@@ -434,10 +434,27 @@ class RosBridge:
         except Exception:
             pass
 
-        # Plot data — extract numeric value
-        value = self._extract_numeric(msg)
-        if value is not None:
-            self._store.append_plot_point(topic, now, value)
+        # Populate plottable field list on first message (for the field picker UI)
+        if topic not in self._store._topic_fields:
+            numeric_fields = [
+                f["path"] for f in self._describe_fields(msg)
+                if f["type"] in ("int", "float")
+            ]
+            if numeric_fields:
+                self._store.update_topic_fields(topic, numeric_fields)
+
+        # Fan out to every pinned "topic::field" key for this topic
+        pinned_keys = self._store.snapshot_plot_topics()
+        for key in pinned_keys:
+            if "::" in key:
+                t, field = key.split("::", 1)
+            else:
+                t, field = key, "data"
+            if t != topic:
+                continue
+            value = self._extract_field(msg, field)
+            if value is not None:
+                self._store.append_plot_point(key, now, value)
 
     def _extract_numeric(self, msg: Any) -> Optional[float]:
         """
@@ -466,6 +483,30 @@ class RosBridge:
 
         return None
 
+    def _extract_field(self, msg: Any, field: str) -> Optional[float]:
+        """
+        Extract a numeric value from *msg* by dot-separated *field* path.
+        Falls back to ``_extract_numeric`` when field is "data" or the path
+        cannot be resolved.
+
+        Examples::
+            _extract_field(msg, "data")           # std_msgs/Float64
+            _extract_field(msg, "linear.x")       # geometry_msgs/Twist
+            _extract_field(msg, "position.x")     # geometry_msgs/Point
+        """
+        if field == "data":
+            return self._extract_numeric(msg)
+        try:
+            obj = msg
+            for part in field.split("."):
+                obj = getattr(obj, part)
+            if isinstance(obj, (int, float)) and not isinstance(obj, bool):
+                return float(obj)
+        except Exception:
+            pass
+        # Path didn't resolve — fall back
+        return self._extract_numeric(msg)
+
     # -----------------------------------------------------------------------
     # Plot subscriptions
     # -----------------------------------------------------------------------
@@ -473,20 +514,23 @@ class RosBridge:
     def _refresh_plot_subscriptions(self) -> None:
         """
         Sync rclpy subscriptions with the set of pinned plot topics.
-        Creates new subs, removes stale ones.
+        Keys in the store are "topic::field"; we subscribe once per unique
+        topic (the rclpy subscription covers all fields of that topic).
         """
         if self._node is None:
             return
 
-        pinned = set(self._store.snapshot_plot_topics())
+        # Derive the set of unique ROS topic names from pinned keys
+        pinned_keys = set(self._store.snapshot_plot_topics())
+        pinned_topics = {k.split("::")[0] if "::" in k else k for k in pinned_keys}
         subscribed = set(self._plot_subs.keys())
 
         # Topics to add
-        for topic in pinned - subscribed:
+        for topic in pinned_topics - subscribed:
             self._create_plot_subscription(topic)
 
-        # Topics to remove
-        for topic in subscribed - pinned:
+        # Topics to remove — only if no pinned key references this topic any more
+        for topic in subscribed - pinned_topics:
             try:
                 self._node.destroy_subscription(self._plot_subs.pop(topic))
             except Exception:
