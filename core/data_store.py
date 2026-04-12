@@ -70,6 +70,15 @@ class ParamChangeMarker:
 
 
 @dataclass(frozen=True)
+class TFTransform:
+    parent: str
+    child: str
+    last_update: float      # time.monotonic() of last received transform
+    is_static: bool         # from /tf_static
+    publisher_node: str     # best-effort, may be empty
+
+
+@dataclass(frozen=True)
 class SystemSnapshot:
     cpu_percent: float
     memory_used_mb: float
@@ -116,10 +125,12 @@ class DataStore:
         self._params: Dict[str, Dict[str, ParamSnapshot]] = {}
         self._param_change_history: deque = deque(maxlen=200)
 
-        # Plot series: {"topic::field": _PlotSeries}
+        # Plot series: {topic_name: _PlotSeries}
         self._plot_series: Dict[str, _PlotSeries] = {}
-        # Available fields per topic: {topic: [field_path, ...]}
-        self._topic_fields: Dict[str, List[str]] = {}
+
+        # TF transforms: {(parent, child): TFTransform}
+        self._tf_transforms: Dict[Tuple[str, str], TFTransform] = {}
+        self._tf_static: Dict[Tuple[str, str], TFTransform] = {}
 
         # Log lines from /rosout
         self._log_lines: deque = deque(maxlen=500)
@@ -152,19 +163,13 @@ class DataStore:
         with self._lock:
             self._param_change_history.append(marker)
 
-    def append_plot_point(self, topic: str, field: str, timestamp: float, value: float) -> None:
-        key = f"{topic}::{field}"
+    def append_plot_point(self, topic: str, timestamp: float, value: float) -> None:
         with self._lock:
-            if key not in self._plot_series:
-                self._plot_series[key] = _PlotSeries(topic=topic)
-            self._plot_series[key].points.append(
+            if topic not in self._plot_series:
+                self._plot_series[topic] = _PlotSeries(topic=topic)
+            self._plot_series[topic].points.append(
                 PlotPoint(timestamp=timestamp, value=value)
             )
-
-    def update_topic_fields(self, topic: str, fields: List[str]) -> None:
-        """Register available numeric field paths for a topic."""
-        with self._lock:
-            self._topic_fields[topic] = list(fields)
 
     def append_log_line(self, line: str) -> None:
         with self._lock:
@@ -174,22 +179,15 @@ class DataStore:
         with self._lock:
             self._ros_connected = connected
 
-    def add_plot_topic(self, topic: str, field: str = "data") -> None:
-        """Pin a topic+field to the plot panel."""
-        key = f"{topic}::{field}"
+    def add_plot_topic(self, topic: str) -> None:
+        """Pin a topic to the plot panel."""
         with self._lock:
-            if key not in self._plot_series:
-                self._plot_series[key] = _PlotSeries(topic=topic)
+            if topic not in self._plot_series:
+                self._plot_series[topic] = _PlotSeries(topic=topic)
 
-    def remove_plot_topic(self, topic: str, field: Optional[str] = None) -> None:
+    def remove_plot_topic(self, topic: str) -> None:
         with self._lock:
-            if field is not None:
-                self._plot_series.pop(f"{topic}::{field}", None)
-            else:
-                # Remove all fields for this topic
-                keys = [k for k in self._plot_series if k.startswith(f"{topic}::")]
-                for k in keys:
-                    del self._plot_series[k]
+            self._plot_series.pop(topic, None)
 
     # -----------------------------------------------------------------------
     # Read API (called from TUI thread — returns copies, never live objects)
@@ -253,24 +251,30 @@ class DataStore:
             return result
 
     def snapshot_plot_topics(self) -> List[str]:
-        """Currently pinned plot topic keys ("topic::field" format)."""
+        """Currently pinned plot topics."""
         with self._lock:
             return list(self._plot_series.keys())
-
-    def snapshot_topic_fields(self, topic: str) -> List[str]:
-        """Available numeric field paths for a topic."""
-        with self._lock:
-            return list(self._topic_fields.get(topic, []))
-
-    def snapshot_all_topic_fields(self) -> Dict[str, List[str]]:
-        """All known topic -> fields mappings."""
-        with self._lock:
-            return {t: list(f) for t, f in self._topic_fields.items()}
 
     def snapshot_param_changes(self) -> List[ParamChangeMarker]:
         """All parameter change markers (for plot overlay)."""
         with self._lock:
             return list(self._param_change_history)
+
+    def update_tf(self, parent: str, child: str, timestamp: float,
+                  is_static: bool = False, publisher_node: str = "") -> None:
+        key = (parent, child)
+        tf = TFTransform(parent=parent, child=child, last_update=timestamp,
+                         is_static=is_static, publisher_node=publisher_node)
+        with self._lock:
+            if is_static:
+                self._tf_static[key] = tf
+            else:
+                self._tf_transforms[key] = tf
+
+    def snapshot_tf(self) -> Tuple[List["TFTransform"], List["TFTransform"]]:
+        """Returns (dynamic_transforms, static_transforms)."""
+        with self._lock:
+            return list(self._tf_transforms.values()), list(self._tf_static.values())
 
     def snapshot_logs(self,
                       node_filter: Optional[str] = None,
@@ -291,8 +295,6 @@ class DataStore:
         with self._lock:
             return self._ros_connected
 
-    def is_plot_topic_pinned(self, topic: str, field: Optional[str] = None) -> bool:
+    def is_plot_topic_pinned(self, topic: str) -> bool:
         with self._lock:
-            if field is not None:
-                return f"{topic}::{field}" in self._plot_series
-            return any(k.startswith(f"{topic}::") for k in self._plot_series)
+            return topic in self._plot_series

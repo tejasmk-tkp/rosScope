@@ -25,6 +25,7 @@ from core.ros_bridge import RosBridge
 from panels.node_overview import NodeOverviewPanel
 from panels.topic_monitor import TopicMonitorPanel
 from panels.param_tuner import ParamTunerPanel
+from panels.tf_tree import TFTreePanel
 from panels.plot_panel import PlotPanel
 
 
@@ -92,6 +93,7 @@ class RosScope(App):
         Binding("1", "switch_tab('tab_nodes')",  "Nodes",  show=True),
         Binding("2", "switch_tab('tab_topics')", "Topics", show=True),
         Binding("3", "switch_tab('tab_params')", "Params", show=True),
+        Binding("4", "switch_tab('tab_tf')",     "TF",     show=True),
     ]
 
     def __init__(self, store: DataStore, bridge: RosBridge, **kwargs):
@@ -110,6 +112,8 @@ class RosScope(App):
                 yield TopicMonitorPanel(self._store)
             with TabPane("Params [3]", id="tab_params"):
                 yield ParamTunerPanel(self._store, self._bridge)
+            with TabPane("TF [4]", id="tab_tf"):
+                yield TFTreePanel(self._store)
         yield Footer()
 
     def action_focus_toggle(self) -> None:
@@ -221,15 +225,26 @@ def _inject_demo_data(store: DataStore) -> None:
                 "acc_lim_x":         ParamSnapshot("/controller_server", "acc_lim_x",         2.5,  "float"),
                 "xy_goal_tolerance": ParamSnapshot("/controller_server", "xy_goal_tolerance", 0.05, "float"),
             })
-            store.add_plot_topic("/cmd_vel", "linear.x")
-            store.add_plot_topic("/cmd_vel", "angular.z")
-            store.add_plot_topic("/odom",    "twist.twist.linear.x")
-            store.update_topic_fields("/cmd_vel", ["linear.x", "linear.y", "linear.z", "angular.x", "angular.y", "angular.z"])
-            store.update_topic_fields("/odom",    ["twist.twist.linear.x", "twist.twist.angular.z", "pose.pose.position.x", "pose.pose.position.y"])
-            store.update_topic_fields("/scan",    ["angle_min", "angle_max", "range_min", "range_max"])
-            store.append_plot_point("/cmd_vel", "linear.x",              time.monotonic(), 0.5 * _math.sin(t * 0.5))
-            store.append_plot_point("/cmd_vel", "angular.z",             time.monotonic(), 0.3 * _math.cos(t * 0.4))
-            store.append_plot_point("/odom",    "twist.twist.linear.x",  time.monotonic(), 0.5 * _math.sin(t * 0.5) * 0.9 + 0.02 * _math.sin(t * 3))
+            store.add_plot_topic("/cmd_vel")
+            store.add_plot_topic("/odom")
+            store.append_plot_point("/cmd_vel", time.monotonic(), 0.5 * _math.sin(t * 0.5))
+            store.append_plot_point("/odom",    time.monotonic(), 0.3 * _math.cos(t * 0.3))
+            # Demo TF tree
+            now = time.monotonic()
+            # Dynamic TFs — simulate ZED going stale after t=30
+            zed_age = 0.05 if t < 30 else (t - 30) * 0.1 + 0.05
+            store.update_tf("map",         "odom",             now - 0.04)
+            store.update_tf("odom",        "base_link",        now - 0.03)
+            store.update_tf("base_link",   "laser_frame",      now - 0.04)
+            store.update_tf("base_link",   "zed_camera_link",  now - zed_age)
+            store.update_tf("zed_camera_link", "zed_left_camera_frame",  now - zed_age)
+            store.update_tf("zed_camera_link", "zed_right_camera_frame", now - zed_age)
+            store.update_tf("base_link",   "imu_link",         now - 0.02)
+            # Static TFs
+            store.update_tf("base_link",   "base_footprint",   now, is_static=True)
+            store.update_tf("base_link",   "caster_wheel",     now, is_static=True)
+            store.update_tf("base_link",   "left_wheel",       now, is_static=True)
+            store.update_tf("base_link",   "right_wheel",      now, is_static=True)
             t += 1.0
             time.sleep(1.0)
 

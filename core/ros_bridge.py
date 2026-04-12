@@ -43,8 +43,8 @@ def _try_import_rclpy():
         from rclpy.qos import QoSProfile
         from rcl_interfaces.msg import Log as RosoutMsg
         from rcl_interfaces.srv import GetParameters, SetParameters, ListParameters
-        return rclpy, Node, SingleThreadedExecutor, QoSProfile, RosoutMsg, \
-               GetParameters, SetParameters, ListParameters
+        from tf2_msgs.msg import TFMessage
+        return rclpy, Node, SingleThreadedExecutor, QoSProfile, RosoutMsg,                GetParameters, SetParameters, ListParameters, TFMessage
     except ImportError:
         return None
 
@@ -128,13 +128,14 @@ class RosBridge:
         """
         self._param_set_queue.put((node, param, value, on_done))
 
-    def pin_plot_topic(self, topic: str, field: str = "data") -> None:
-        """Add a topic+field to the plot panel — bridge will subscribe if needed."""
-        self._store.add_plot_topic(topic, field)
-        # Subscription created on next _refresh_plot_subscriptions() tick
+    def pin_plot_topic(self, topic: str) -> None:
+        """Add a topic to the plot panel — bridge will subscribe to it."""
+        self._store.add_plot_topic(topic)
+        # Actual subscription happens in _refresh_plot_subscriptions()
+        # which runs on the next discovery cycle inside the spin thread.
 
-    def unpin_plot_topic(self, topic: str, field: Optional[str] = None) -> None:
-        self._store.remove_plot_topic(topic, field)
+    def unpin_plot_topic(self, topic: str) -> None:
+        self._store.remove_plot_topic(topic)
 
     def fetch_params(self, ros_node: str) -> None:
         """
@@ -157,7 +158,8 @@ class RosBridge:
 
         (rclpy, Node, SingleThreadedExecutor,
          QoSProfile, RosoutMsg,
-         GetParameters, SetParameters, ListParameters) = imports
+         GetParameters, SetParameters, ListParameters,
+         TFMessage) = imports
 
         self._rclpy = rclpy
 
@@ -184,6 +186,17 @@ class RosBridge:
             )
         except Exception as e:
             log.warning(f"Could not subscribe to /rosout: {e}")
+
+        # Subscribe to /tf and /tf_static
+        try:
+            self._node.create_subscription(
+                TFMessage, "/tf",
+                lambda msg: self._on_tf_msg(msg, is_static=False), 100)
+            self._node.create_subscription(
+                TFMessage, "/tf_static",
+                lambda msg: self._on_tf_msg(msg, is_static=True), 100)
+        except Exception as e:
+            log.warning(f"Could not subscribe to /tf: {e}")
 
         # Timers
         self._node.create_timer(1.0,  self._tick_resources)
@@ -376,69 +389,37 @@ class RosBridge:
         except Exception:
             pass
 
-        # Plot data — extract all pinned fields for this topic
-        pinned_keys = [k for k in self._store.snapshot_plot_topics()
-                       if k.startswith(f"{topic}::")]
-        for key in pinned_keys:
-            field = key.split("::", 1)[1]
-            value = self._extract_field(msg, field)
-            if value is not None:
-                self._store.append_plot_point(topic, field, now, value)
+        # Plot data — extract numeric value
+        value = self._extract_numeric(msg)
+        if value is not None:
+            self._store.append_plot_point(topic, now, value)
 
-        # Register available fields on first message
-        if topic not in getattr(self, "_fields_registered", set()):
-            fields = self._enumerate_fields(msg)
-            if fields:
-                self._store.update_topic_fields(topic, fields)
-            if not hasattr(self, "_fields_registered"):
-                self._fields_registered = set()
-            self._fields_registered.add(topic)
+    def _extract_numeric(self, msg: Any) -> Optional[float]:
+        """
+        Best-effort extraction of a float from a ROS message.
+        Handles: std_msgs/Float*, geometry_msgs/Twist (linear.x), scalar data fields.
+        Returns None if no numeric value found.
+        """
+        # std_msgs Float32/Float64
+        if hasattr(msg, "data") and isinstance(msg.data, (int, float)):
+            return float(msg.data)
 
-    def _extract_field(self, msg: Any, field_path: str) -> Optional[float]:
-        """
-        Extract a numeric value from a message by dot-notation field path.
-        e.g. "linear.x", "twist.twist.linear.x", "data", "pose.pose.position.x"
-        Returns None if path is invalid or value is not numeric.
-        """
-        try:
-            obj = msg
-            for part in field_path.split("."):
-                obj = getattr(obj, part)
-            if isinstance(obj, (int, float)) and not isinstance(obj, bool):
-                return float(obj)
-        except AttributeError:
-            pass
+        # geometry_msgs/Twist — use linear.x as primary signal
+        if hasattr(msg, "linear") and hasattr(msg.linear, "x"):
+            return float(msg.linear.x)
+
+        # nav_msgs/Odometry — linear velocity
+        if hasattr(msg, "twist") and hasattr(msg.twist, "twist"):
+            if hasattr(msg.twist.twist, "linear"):
+                return float(msg.twist.twist.linear.x)
+
+        # First float field found
+        for attr in vars(msg) if hasattr(msg, "__dict__") else []:
+            val = getattr(msg, attr, None)
+            if isinstance(val, float):
+                return val
+
         return None
-
-    def _enumerate_fields(self, msg: Any, prefix: str = "", depth: int = 0) -> List[str]:
-        """
-        Walk a ROS message recursively and return all dot-paths to numeric leaves.
-        e.g. for Twist: ["linear.x", "linear.y", "linear.z", "angular.x", ...]
-        Max depth 4 to avoid array/header noise.
-        """
-        if depth > 4:
-            return []
-        fields = []
-        slots = getattr(msg, "__slots__", None) or list(vars(msg).keys() if hasattr(msg, "__dict__") else [])
-        for slot in slots:
-            # Skip ROS metadata fields
-            if slot in ("_header", "header", "_check_fields"):
-                continue
-            attr_name = slot.lstrip("_")
-            try:
-                val = getattr(msg, attr_name, None)
-                if val is None:
-                    val = getattr(msg, slot, None)
-            except Exception:
-                continue
-            if val is None:
-                continue
-            path = f"{prefix}.{attr_name}" if prefix else attr_name
-            if isinstance(val, (int, float)) and not isinstance(val, bool):
-                fields.append(path)
-            elif hasattr(val, "__slots__") or hasattr(val, "__dict__"):
-                fields.extend(self._enumerate_fields(val, path, depth + 1))
-        return fields
 
     # -----------------------------------------------------------------------
     # Plot subscriptions
@@ -613,6 +594,17 @@ class RosBridge:
     # -----------------------------------------------------------------------
     # /rosout callback
     # -----------------------------------------------------------------------
+
+    def _on_tf_msg(self, msg: Any, is_static: bool) -> None:
+        """Handle /tf and /tf_static messages — update staleness tracker."""
+        now = time.monotonic()
+        try:
+            for transform in msg.transforms:
+                parent = transform.header.frame_id
+                child  = transform.child_frame_id
+                self._store.update_tf(parent, child, now, is_static=is_static)
+        except Exception as e:
+            log.debug(f"TF callback error: {e}")
 
     def _rosout_cb(self, msg: Any) -> None:
         try:
