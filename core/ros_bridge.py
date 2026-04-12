@@ -595,89 +595,70 @@ class RosBridge:
         import yaml
         from .data_store import ParamSnapshot
 
-        # Try `ros2 param dump` (uses existing daemon — much faster than --no-daemon)
         try:
             result = subprocess.run(
                 ["ros2", "param", "dump", ros_node],
                 capture_output=True, text=True, timeout=8.0,
             )
-            if result.returncode == 0 and result.stdout.strip():
-                data = yaml.safe_load(result.stdout)
-                if isinstance(data, dict):
-                    # yaml key may be "node_name", "/node_name", or "ns/node_name"
-                    node_bare = ros_node.lstrip("/")
-                    params_dict = {}
-                    for key in data:
-                        key_bare = str(key).lstrip("/")
-                        if key_bare == node_bare or key_bare.endswith("/" + node_bare.split("/")[-1]):
-                            params_dict = data[key].get("ros__parameters", {})
-                            break
-                    if not params_dict and data:
-                        # Single-entry yaml — just take the first one
-                        first = next(iter(data.values()))
-                        if isinstance(first, dict):
-                            params_dict = first.get("ros__parameters", {})
-
-                    if params_dict:
-                        snapshots: Dict[str, ParamSnapshot] = {}
-                        for pname, pval in params_dict.items():
-                            snapshots[pname] = ParamSnapshot(
-                                node=ros_node,
-                                name=pname,
-                                value=pval,
-                                type_name=type(pval).__name__,
-                            )
-                        self._store.update_params(ros_node, snapshots)
-                        return
-
         except Exception as e:
-            log.debug(f"param dump error for {ros_node}: {e}")
+            log.warning(f"param dump failed for {ros_node}: {e}")
+            return
 
-        # Fallback: ros2 param list + get each param individually
+        log.debug(f"param dump [{ros_node}] rc={result.returncode} stdout={result.stdout[:300]!r}")
+
+        if result.returncode != 0 or not result.stdout.strip():
+            log.warning(f"param dump failed for {ros_node}: {result.stderr.strip()}")
+            return
+
         try:
-            list_result = subprocess.run(
-                ["ros2", "param", "list", ros_node],
-                capture_output=True, text=True, timeout=5.0,
-            )
-            if list_result.returncode != 0:
-                log.debug(f"param list failed for {ros_node}: {list_result.stderr}")
-                return
-
-            param_names = [l.strip() for l in list_result.stdout.splitlines()
-                           if l.strip() and not l.strip().startswith("/")]
-
-            snapshots = {}
-            for pname in param_names:
-                try:
-                    get_result = subprocess.run(
-                        ["ros2", "param", "get", ros_node, pname],
-                        capture_output=True, text=True, timeout=3.0,
-                    )
-                    if get_result.returncode == 0:
-                        # Output: "Integer value is: 42" / "String value is: foo"
-                        line = get_result.stdout.strip()
-                        pval: Any = line.split(":", 1)[-1].strip() if ":" in line else line
-                        # Try to coerce to native type
-                        for coerce in (int, float):
-                            try:
-                                pval = coerce(pval)
-                                break
-                            except (ValueError, TypeError):
-                                pass
-                        if isinstance(pval, str) and pval.lower() in ("true", "false"):
-                            pval = pval.lower() == "true"
-                        snapshots[pname] = ParamSnapshot(
-                            node=ros_node, name=pname,
-                            value=pval, type_name=type(pval).__name__,
-                        )
-                except Exception:
-                    pass
-
-            if snapshots:
-                self._store.update_params(ros_node, snapshots)
-
+            data = yaml.safe_load(result.stdout)
         except Exception as e:
-            log.debug(f"fetch_params fallback error for {ros_node}: {e}")
+            log.warning(f"param dump yaml parse error for {ros_node}: {e}")
+            return
+
+        if not isinstance(data, dict):
+            log.warning(f"param dump unexpected type {type(data)} for {ros_node}")
+            return
+
+        # Handle all known output formats:
+        # Format A: {'/node_name': {'ros__parameters': {...}}}
+        # Format B: {'ros__parameters': {...}}   (flat, no node wrapper)
+        # Format C: {'node_name': {'ros__parameters': {...}}}  (no leading slash)
+        params_dict = {}
+
+        if "ros__parameters" in data:
+            # Format B
+            params_dict = data["ros__parameters"]
+        else:
+            node_bare = ros_node.lstrip("/")
+            for key, val in data.items():
+                key_bare = str(key).lstrip("/")
+                if isinstance(val, dict) and (
+                    key_bare == node_bare
+                    or key_bare == node_bare.split("/")[-1]
+                    or node_bare.endswith(key_bare)
+                ):
+                    params_dict = val.get("ros__parameters", {})
+                    break
+            if not params_dict:
+                # Last resort — first entry with ros__parameters
+                for val in data.values():
+                    if isinstance(val, dict) and "ros__parameters" in val:
+                        params_dict = val["ros__parameters"]
+                        break
+
+        if not params_dict:
+            log.warning(f"no ros__parameters found for {ros_node}, keys={list(data.keys())}")
+            return
+
+        snapshots: Dict[str, ParamSnapshot] = {}
+        for pname, pval in params_dict.items():
+            snapshots[pname] = ParamSnapshot(
+                node=ros_node, name=pname,
+                value=pval, type_name=type(pval).__name__,
+            )
+        self._store.update_params(ros_node, snapshots)
+        log.info(f"Loaded {len(snapshots)} params for {ros_node}")
 
     def _do_set_param(self,
                       ros_node: str,
