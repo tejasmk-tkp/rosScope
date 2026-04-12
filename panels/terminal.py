@@ -250,6 +250,9 @@ class TerminalPanel(Widget):
         self._start_shell()
 
     def on_unmount(self) -> None:
+        self._running = False  # signal thread to exit before killing pty
+        if self._reader_thread and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=1.0)
         self._stop_shell()
 
     # -----------------------------------------------------------------------
@@ -271,7 +274,6 @@ class TerminalPanel(Widget):
         self._update_header("running")
 
     def _stop_shell(self) -> None:
-        self._running = False
         if self._pty:
             self._pty.stop()
 
@@ -280,8 +282,16 @@ class TerminalPanel(Widget):
         while self._running and self._pty and self._pty.alive:
             data = self._pty.read_available(timeout=0.05)
             if data:
-                self.app.call_from_thread(self._feed, data)
-        self.app.call_from_thread(self._update_header, "exited")
+                try:
+                    self.app.call_from_thread(self._feed, data)
+                except Exception:
+                    break  # app is shutting down — exit quietly
+        # Only call back into the app if we're still running (not a shutdown exit)
+        if self._running:
+            try:
+                self.app.call_from_thread(self._update_header, "exited")
+            except Exception:
+                pass
 
     def _feed(self, data: str) -> None:
         try:
