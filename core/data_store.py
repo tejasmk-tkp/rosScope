@@ -208,6 +208,8 @@ class DataStore:
     def snapshot_pinned_nodes(self) -> List[str]:
         with self._lock:
             return list(self._pinned_nodes)
+
+    def update_params(self, node: str, params: Dict[str, "ParamSnapshot"]) -> None:
         with self._lock:
             self._params[node] = dict(params)
 
