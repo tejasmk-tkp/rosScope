@@ -73,6 +73,8 @@ class ParamTunerPanel(Widget):
         self._selected_param: Optional[ParamSnapshot] = None
         self._history: List[tuple] = []
         self._ck: dict = {}
+        self._suppress_select: bool = False
+        self._suppress_select: bool = False  # guard against spurious select events
 
     def compose(self) -> ComposeResult:
         yield Select([], prompt="Select a node… (Tab to reach)", id="node_select")
@@ -121,11 +123,14 @@ class ParamTunerPanel(Widget):
         cached = self._store.snapshot_param_nodes()
         all_nodes = sorted(set(live + cached))
         sel = self.query_one("#node_select", Select)
-        # Preserve current selection — set_options() resets value to BLANK
         current = self._selected_node
-        sel.set_options([(n, n) for n in all_nodes])
-        if current and current in all_nodes:
-            sel.value = current
+        self._suppress_select = True
+        try:
+            sel.set_options([(n, n) for n in all_nodes])
+            if current and current in all_nodes:
+                sel.value = current
+        finally:
+            self._suppress_select = False
 
     # -----------------------------------------------------------------------
     # Param table
@@ -159,11 +164,13 @@ class ParamTunerPanel(Widget):
     # -----------------------------------------------------------------------
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.value is Select.BLANK or not event.value:
+        if self._suppress_select:
+            return
+        if not event.value or event.value is Select.BLANK:
             return
         node = str(event.value)
         if node == self._selected_node:
-            return  # spurious re-fire from set_options — ignore
+            return
         self._selected_node = node
         if self._bridge:
             self._bridge.fetch_params(self._selected_node)
