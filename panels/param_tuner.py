@@ -121,7 +121,11 @@ class ParamTunerPanel(Widget):
         cached = self._store.snapshot_param_nodes()
         all_nodes = sorted(set(live + cached))
         sel = self.query_one("#node_select", Select)
+        # Preserve current selection — set_options() resets value to BLANK
+        current = self._selected_node
         sel.set_options([(n, n) for n in all_nodes])
+        if current and current in all_nodes:
+            sel.value = current
 
     # -----------------------------------------------------------------------
     # Param table
@@ -155,11 +159,15 @@ class ParamTunerPanel(Widget):
     # -----------------------------------------------------------------------
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.value and event.value != Select.BLANK:
-            self._selected_node = event.value
-            if self._bridge:
-                self._bridge.fetch_params(self._selected_node)
-            self._set_status(f"Fetching params for {self._selected_node}…")
+        if event.value is Select.BLANK or not event.value:
+            return
+        node = str(event.value)
+        if node == self._selected_node:
+            return  # spurious re-fire from set_options — ignore
+        self._selected_node = node
+        if self._bridge:
+            self._bridge.fetch_params(self._selected_node)
+        self._set_status(f"Fetching params for {self._selected_node}…")
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if not event.row_key or not self._selected_node:
