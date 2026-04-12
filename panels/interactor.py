@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from textual.app import ComposeResult
 from textual.widget import Widget
-from textual.widgets import Static, Input, Button, Label, Select, Switch, OptionList
+from textual.widgets import Static, Input, Button, Label, Select, Switch
 from textual.containers import Horizontal, Vertical, ScrollableContainer
 from textual.binding import Binding
 from textual.css.query import NoMatches
@@ -112,6 +112,11 @@ class FieldForm(ScrollableContainer):
         border: solid $accent;
         background: $surface-darken-1;
     }
+    FieldForm.empty {
+        height: 2;
+        border: none;
+        background: transparent;
+    }
     """
 
     def __init__(self, fields: List[dict], **kwargs):
@@ -120,6 +125,7 @@ class FieldForm(ScrollableContainer):
 
     def compose(self) -> ComposeResult:
         if not self._fields:
+            self.add_class("empty")
             yield Static("  [dim]No fields — select a topic/service above[/dim]")
             return
         # Group by top-level prefix for visual separation
