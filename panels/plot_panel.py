@@ -3,7 +3,7 @@ panels/plot_panel.py — Time-series plot panel.
 
 Topic selector: searchable dropdown (Input + OptionList overlay).
 Braille dot renderer via Static.update().
-Pinned topics shown in a focusable chip bar — navigate with ←/→, unpin with Del/x.
+Pinned topics shown in a focusable chip bar — navigate with ←/→, unpin with Delete/x.
 """
 
 import time
@@ -13,7 +13,7 @@ from textual.app import ComposeResult
 from textual.widget import Widget
 from textual.widgets import Static, Input, Button, OptionList
 from textual.widgets._option_list import Option
-from textual.containers import Horizontal, ScrollableContainer
+from textual.containers import Horizontal, Vertical
 from textual.binding import Binding
 from textual.css.query import NoMatches
 from textual.message import Message
@@ -139,16 +139,12 @@ def render_plot_text(series, markers, window, cw, ch) -> Text:
 
 
 # ---------------------------------------------------------------------------
-# Topic search dropdown
+# Topic search dropdown — mounted at app level to float above all widgets
 # ---------------------------------------------------------------------------
 
 
 class TopicDropdown(OptionList):
-    """
-    Floating OptionList mounted at app level so it renders above all panels.
-    Uses a direct callback instead of messages — avoids the bubbling-to-App
-    problem that occurs when a widget is mounted outside its logical parent.
-    """
+    """Floating OptionList at app level. Uses callback to avoid message routing issues."""
 
     DEFAULT_CSS = """
     TopicDropdown {
@@ -178,7 +174,7 @@ class TopicDropdown(OptionList):
 
 
 class TopicSearchBar(Widget):
-    """Input + floating dropdown. Emits TopicSearchBar.Selected(topic)."""
+    """Input + floating OptionList. Emits TopicSearchBar.Selected(topic)."""
 
     DEFAULT_CSS = """
     TopicSearchBar {
@@ -214,7 +210,6 @@ class TopicSearchBar(Widget):
         self.set_interval(2.0, self._refresh_topic_list)
 
     def _on_topic_chosen(self, topic: str) -> None:
-        """Direct callback from TopicDropdown — no message routing needed."""
         try:
             self.query_one("#search_input", Input).value = ""
         except NoMatches:
@@ -244,10 +239,8 @@ class TopicSearchBar(Widget):
                    if query else self._all_topics)
         self._dropdown.clear_options()
         if matches:
-            self._dropdown.add_options([
-                Option(t, id=t.replace("/", "__").replace(".", "_"))
-                for t in matches
-            ])
+            self._dropdown.add_options(
+                [Option(t, id=t.replace("/", "__")) for t in matches])
             self._reposition()
             self._dropdown.display = True
         else:
@@ -288,14 +281,12 @@ class TopicSearchBar(Widget):
 
 
 # ---------------------------------------------------------------------------
-# Pinned topic chip
+# Pinned topic chip — focusable, shows [×] when focused, Del/x to unpin
 # ---------------------------------------------------------------------------
 
 
 class TopicChip(Widget):
-    """Focusable chip. Del/x/backspace unpins. Click to focus, click again to unpin."""
-
-    CAN_FOCUS = True
+    """Single focusable chip for a pinned topic."""
 
     DEFAULT_CSS = """
     TopicChip {
@@ -318,6 +309,7 @@ class TopicChip(Widget):
 
     def __init__(self, topic: str, color: str, **kwargs):
         super().__init__(**kwargs)
+        self.can_focus = True
         self._topic = topic
         self._color = color
 
@@ -350,15 +342,15 @@ class TopicChip(Widget):
 
 
 # ---------------------------------------------------------------------------
-# Chip bar
+# Chip bar — horizontal row of TopicChips, keyboard-navigable
 # ---------------------------------------------------------------------------
 
 
-class PinnedTopicsBar(ScrollableContainer):
+class PinnedTopicsBar(Widget):
     """
-    Horizontal row of TopicChips.
-    ←/→ navigates between chips. Del/x/backspace on focused chip unpins it.
-    Only rebuilds DOM when the list of pinned topics actually changes.
+    Horizontal row of TopicChips. Plain Widget — ScrollableContainer swallows
+    key events in Textual 0.82 before chips see them.
+    Surgical DOM updates preserve focus across 1Hz refresh ticks.
     """
 
     DEFAULT_CSS = """
@@ -385,9 +377,8 @@ class PinnedTopicsBar(ScrollableContainer):
     def set_chips(self, items: List[Tuple[str, str]]) -> None:
         new_topics = [t for t, _ in items]
         if new_topics == self._current_topics:
-            return  # No change — skip DOM update, focus is preserved
+            return  # Nothing changed — skip entirely, focus preserved
 
-        # Remember which chip was focused so we can restore it
         focused = self.app.focused
         focused_topic: Optional[str] = (focused._topic if isinstance(
             focused, TopicChip) else None)
@@ -395,12 +386,12 @@ class PinnedTopicsBar(ScrollableContainer):
         self._current_topics = new_topics
         new_set = set(new_topics)
 
-        # Remove chips that are no longer pinned
+        # Remove stale chips
         for chip in list(self.query(TopicChip)):
             if chip._topic not in new_set:
                 chip.remove()
 
-        # Remove the empty-hint if it exists
+        # Remove empty hint if present
         try:
             self.query_one("#no_topics_hint").remove()
         except NoMatches:
@@ -414,10 +405,10 @@ class PinnedTopicsBar(ScrollableContainer):
                 ))
             return
 
-        # Add chips that are newly pinned
-        existing_topics = {c._topic for c in self.query(TopicChip)}
+        # Add only newly pinned chips
+        existing = {c._topic for c in self.query(TopicChip)}
         for topic, color in items:
-            if topic not in existing_topics:
+            if topic not in existing:
                 chip_id = "chip_" + topic.replace("/", "__").replace(".", "_")
                 self.mount(TopicChip(topic, color, id=chip_id))
 
@@ -535,7 +526,7 @@ class VarianceTable(Static):
 class PlotPanel(Widget):
     BINDINGS = [
         Binding("ctrl+w", "cycle_window", "Cycle window"),
-        Binding("ctrl+g", "focus_chips", "Go to chips"),
+        Binding("ctrl+u", "focus_chips", "Go to chips"),
     ]
 
     DEFAULT_CSS = """
@@ -567,6 +558,15 @@ class PlotPanel(Widget):
 
     def on_mount(self) -> None:
         self.set_interval(1.0, self._refresh)
+
+    def on_key(self, event) -> None:
+        import sys
+
+        print(
+            f"[PlotPanel] key={event.key} focused={type(self.app.focused).__name__}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     # -----------------------------------------------------------------------
     # Events
