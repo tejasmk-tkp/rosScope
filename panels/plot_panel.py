@@ -204,9 +204,10 @@ class TopicSearchBar(Widget):
             super().__init__()
             self.topic_key = topic_key  # "topic::field"
 
-    def __init__(self, store: DataStore, **kwargs):
+    def __init__(self, store: DataStore, bridge=None, **kwargs):
         super().__init__(**kwargs)
         self._store = store
+        self._bridge = bridge
         self._all_topics: List[str] = []
         self._pending_topic: Optional[str] = None   # waiting for field selection
         self._dropdown: Optional[TopicDropdown] = None
@@ -225,8 +226,17 @@ class TopicSearchBar(Widget):
             # Stage 1: topic chosen — now show field picker
             self._pending_topic = value
             fields = self._store.snapshot_topic_fields(value)
+            if not fields and self._bridge:
+                # Bridge hasn't received a message yet — introspect statically
+                topics = {t.name: t for t in self._store.snapshot_topics()}
+                snap = topics.get(value)
+                if snap and snap.msg_type:
+                    raw = self._bridge.get_msg_fields(snap.msg_type)
+                    fields = [f["path"] for f in raw if f["type"] in ("int", "float")]
+                    if fields:
+                        self._store.update_topic_fields(value, fields)
             if not fields:
-                # No fields known yet (topic not subscribed) — pin with "data" default
+                # Still nothing — pin with "data" default
                 self._finish_selection(value, "data")
                 return
             self._show_options(fields, placeholder=f"{value} › pick field")
@@ -322,6 +332,109 @@ class TopicSearchBar(Widget):
         except NoMatches:
             pass
         self._hide_dropdown()
+
+
+# ---------------------------------------------------------------------------
+# Node search bar — single-stage picker for CPU/Memory mode
+# ---------------------------------------------------------------------------
+
+class NodeSearchBar(Widget):
+    """Single-stage node picker for CPU/Memory plot mode.
+    Emits NodeSearchBar.Selected(node_name).
+    """
+
+    DEFAULT_CSS = """
+    NodeSearchBar {
+        height: 3;
+        width: 1fr;
+        display: none;
+    }
+    #node_search_input {
+        height: 3;
+        width: 1fr;
+    }
+    """
+
+    class Selected(Message):
+        def __init__(self, node: str) -> None:
+            super().__init__()
+            self.node = node
+
+    def __init__(self, store: DataStore, **kwargs):
+        super().__init__(**kwargs)
+        self._store = store
+        self._all_nodes: List[str] = []
+        self._dropdown: Optional[TopicDropdown] = None
+
+    def compose(self) -> ComposeResult:
+        yield Input(placeholder="search & select node to pin…", id="node_search_input")
+
+    def on_mount(self) -> None:
+        self._dropdown = TopicDropdown(on_chosen=self._on_node_chosen,
+                                       id="node_dropdown")
+        self.app.mount(self._dropdown)
+        self.set_interval(2.0, self._refresh_node_list)
+
+    def _refresh_node_list(self) -> None:
+        self._all_nodes = sorted(n.name for n in self._store.snapshot_nodes())
+
+    def _on_node_chosen(self, value: str) -> None:
+        try:
+            self.query_one("#node_search_input", Input).value = ""
+        except NoMatches:
+            pass
+        if self._dropdown:
+            self._dropdown.display = False
+        self.post_message(self.Selected(value))
+
+    def _reposition(self) -> None:
+        if self._dropdown is None:
+            return
+        try:
+            inp = self.query_one("#node_search_input", Input)
+            off = inp.screen_offset
+            self._dropdown.styles.offset = (off.x, off.y + 3)
+            self._dropdown.styles.width = max(inp.size.width, 40)
+        except Exception:
+            pass
+
+    def _show_dropdown(self, query: str) -> None:
+        matches = (
+            [n for n in self._all_nodes if query.lower() in n.lower()]
+            if query else self._all_nodes
+        )
+        if not matches or not self._dropdown:
+            if self._dropdown:
+                self._dropdown.display = False
+            return
+        self._dropdown.clear_options()
+        self._dropdown.add_options(
+            [Option(n, id=n.replace("/", "__").replace(".", "_")) for n in matches]
+        )
+        self._reposition()
+        self._dropdown.display = True
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "node_search_input":
+            self._show_dropdown(event.value)
+
+    def on_key(self, event) -> None:
+        if self._dropdown is None or not self._dropdown.display:
+            return
+        if event.key == "escape":
+            self._dropdown.display = False
+            event.stop()
+        elif event.key == "down":
+            self._dropdown.focus()
+            event.stop()
+
+    def clear_input(self) -> None:
+        try:
+            self.query_one("#node_search_input", Input).value = ""
+        except NoMatches:
+            pass
+        if self._dropdown:
+            self._dropdown.display = False
 
 
 # ---------------------------------------------------------------------------
@@ -612,7 +725,8 @@ class PlotPanel(Widget):
                 id="mode_select",
                 allow_blank=False,
             )
-            yield TopicSearchBar(self._store, id="topic_search")
+            yield TopicSearchBar(self._store, bridge=self._bridge, id="topic_search")
+            yield NodeSearchBar(self._store, id="node_search")
             yield Button(
                 f"Window {self._window}s Ctrl+W", id="window_btn", variant="default"
             )
@@ -633,9 +747,9 @@ class PlotPanel(Widget):
             self._mode = mode
             canvas = self.query_one("#plot_canvas", PlotCanvas)
             canvas.set_mode(mode)
-            # Show/hide topic search based on mode
-            search = self.query_one("#topic_search", TopicSearchBar)
-            search.display = (mode == "Topics")
+            is_topics = (mode == "Topics")
+            self.query_one("#topic_search", TopicSearchBar).display = is_topics
+            self.query_one("#node_search", NodeSearchBar).display = not is_topics
 
     def on_topic_search_bar_selected(self, event: TopicSearchBar.Selected) -> None:
         # event.topic_key is "topic::field"
@@ -650,10 +764,17 @@ class PlotPanel(Widget):
             self._store.add_plot_topic(topic, field)
         self.query_one("#topic_search", TopicSearchBar).clear_input()
 
+    def on_node_search_bar_selected(self, event: NodeSearchBar.Selected) -> None:
+        self._store.pin_node(event.node)
+        self.query_one("#node_search", NodeSearchBar).clear_input()
+
     def on_pinned_topics_bar_unpin_requested(
             self, event: PinnedTopicsBar.UnpinRequested) -> None:
-        # event.topic is the full "topic::field" key
         key = event.topic
+        if self._mode in ("CPU", "Memory"):
+            # In node modes the chip label is the node name directly
+            self._store.unpin_node(key)
+            return
         if "::" in key:
             topic, field = key.split("::", 1)
         else:
@@ -694,8 +815,13 @@ class PlotPanel(Widget):
         canvas.set_window(self._window)
         canvas.refresh_plot()
 
-        pinned = canvas.get_pinned_with_colors()
-        self.query_one("#pinned_bar", PinnedTopicsBar).set_chips(pinned)
+        if self._mode in ("CPU", "Memory"):
+            # Chips show pinned nodes
+            pinned = self._store.snapshot_pinned_nodes()
+            chips = [(n, _COLORS[i % len(_COLORS)]) for i, n in enumerate(sorted(pinned))]
+        else:
+            chips = canvas.get_pinned_with_colors()
+        self.query_one("#pinned_bar", PinnedTopicsBar).set_chips(chips)
 
         series = self._store.snapshot_plot(window_seconds=self._window)
         markers = self._store.snapshot_param_changes()

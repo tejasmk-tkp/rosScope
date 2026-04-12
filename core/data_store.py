@@ -138,6 +138,9 @@ class DataStore:
         # Node resource history for plot panel
         self._node_plot_history: Dict[str, Any] = {}
 
+        # Pinned nodes for CPU/Memory plot (mirrors _plot_series for topics)
+        self._pinned_nodes: set = set()
+
         # Parameters: {node_name: {param_name: ParamSnapshot}}
         self._params: Dict[str, Dict[str, ParamSnapshot]] = {}
         self._param_change_history: deque = deque(maxlen=200)
@@ -194,7 +197,17 @@ class DataStore:
                 self._node_plot_history[node] = _deque(maxlen=600)
             self._node_plot_history[node].append((timestamp, cpu, mem_mb))
 
-    def update_params(self, node: str, params: Dict[str, ParamSnapshot]) -> None:
+    def pin_node(self, node: str) -> None:
+        with self._lock:
+            self._pinned_nodes.add(node)
+
+    def unpin_node(self, node: str) -> None:
+        with self._lock:
+            self._pinned_nodes.discard(node)
+
+    def snapshot_pinned_nodes(self) -> List[str]:
+        with self._lock:
+            return list(self._pinned_nodes)
         with self._lock:
             self._params[node] = dict(params)
 
@@ -279,8 +292,11 @@ class DataStore:
     def snapshot_node_plot(self, mode: str, window_seconds: float = 30.0):
         cutoff = time.monotonic() - window_seconds
         with self._lock:
+            pinned = self._pinned_nodes if self._pinned_nodes else set(self._node_plot_history.keys())
             result = {}
             for node, history in self._node_plot_history.items():
+                if node not in pinned:
+                    continue
                 pts = []
                 for ts, cpu, mem in history:
                     if ts >= cutoff:
