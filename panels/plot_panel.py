@@ -3,19 +3,20 @@ panels/plot_panel.py — Time-series plot panel.
 
 Topic selector: searchable dropdown (Input + OptionList overlay).
 Braille dot renderer via Static.update().
+Pinned topics shown in a focusable chip bar — navigate with ←/→, unpin with Del/x.
 """
 
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from textual.app import ComposeResult
 from textual.widget import Widget
-from textual.message import Message
 from textual.widgets import Static, Input, Button, OptionList
 from textual.widgets._option_list import Option
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, ScrollableContainer
 from textual.binding import Binding
 from textual.css.query import NoMatches
+from textual.message import Message
 from rich.text import Text
 from rich.style import Style
 
@@ -143,28 +144,51 @@ def render_plot_text(series, markers, window, cw, ch) -> Text:
 
 
 class TopicDropdown(OptionList):
-    """Floating option list that appears beneath the search input."""
+    """
+    Floating OptionList mounted at app level so it renders above all panels.
+    Uses a direct callback instead of messages — avoids the bubbling-to-App
+    problem that occurs when a widget is mounted outside its logical parent.
+    """
 
     DEFAULT_CSS = """
     TopicDropdown {
-        layer: overlay;
-        dock: top;
-        margin-top: 3;
+        display: none;
         height: auto;
         max-height: 12;
-        border: solid $accent;
+        width: 60;
+        border: tall $accent;
         background: $surface;
-        display: none;
-        z-index: 999;
     }
     """
 
+    def __init__(self, on_chosen: Callable[[str], None], **kwargs):
+        super().__init__(**kwargs)
+        self._on_chosen = on_chosen
 
-class TopicSearchBar(Vertical):
-    """
-    Input + floating OptionList.
-    Filters available topics as you type.
-    Emits TopicSearchBar.Selected(topic) when a topic is chosen.
+    def on_option_list_option_selected(
+            self, event: OptionList.OptionSelected) -> None:
+        self.display = False
+        self._on_chosen(str(event.option.prompt))
+        event.stop()
+
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            self.display = False
+            event.stop()
+
+
+class TopicSearchBar(Widget):
+    """Input + floating dropdown. Emits TopicSearchBar.Selected(topic)."""
+
+    DEFAULT_CSS = """
+    TopicSearchBar {
+        height: 3;
+        width: 1fr;
+    }
+    #search_input {
+        height: 3;
+        width: 1fr;
+    }
     """
 
     class Selected(Message):
@@ -173,50 +197,65 @@ class TopicSearchBar(Vertical):
             super().__init__()
             self.topic = topic
 
-    DEFAULT_CSS = """
-    TopicSearchBar {
-        height: 3;
-        layers: base overlay;
-    }
-    #search_input { height: 3; }
-    """
-
     def __init__(self, store: DataStore, **kwargs):
         super().__init__(**kwargs)
         self._store = store
         self._all_topics: List[str] = []
+        self._dropdown: Optional[TopicDropdown] = None
 
     def compose(self) -> ComposeResult:
-        yield Input(
-            placeholder="search & select topic to pin…",
-            id="search_input",
-        )
-        yield TopicDropdown(id="topic_dropdown")
+        yield Input(placeholder="search & select topic to pin…",
+                    id="search_input")
 
     def on_mount(self) -> None:
+        self._dropdown = TopicDropdown(on_chosen=self._on_topic_chosen,
+                                       id="topic_dropdown")
+        self.app.mount(self._dropdown)
         self.set_interval(2.0, self._refresh_topic_list)
+
+    def _on_topic_chosen(self, topic: str) -> None:
+        """Direct callback from TopicDropdown — no message routing needed."""
+        try:
+            self.query_one("#search_input", Input).value = ""
+        except NoMatches:
+            pass
+        self.post_message(self.Selected(topic))
+
+    def _reposition(self) -> None:
+        if self._dropdown is None:
+            return
+        try:
+            inp = self.query_one("#search_input", Input)
+            off = inp.screen_offset
+            self._dropdown.styles.offset = (off.x, off.y + 3)
+            self._dropdown.styles.width = max(inp.size.width, 40)
+        except Exception:
+            pass
 
     def _refresh_topic_list(self) -> None:
         topics = [t.name for t in self._store.snapshot_topics()]
-        # Also include already-pinned topics
         pinned = self._store.snapshot_plot_topics()
         self._all_topics = sorted(set(topics + pinned))
 
     def _show_dropdown(self, query: str) -> None:
-        dd = self.query_one("#topic_dropdown", TopicDropdown)
+        if self._dropdown is None:
+            return
         matches = ([t for t in self._all_topics if query.lower() in t.lower()]
                    if query else self._all_topics)
-
-        dd.clear_options()
+        self._dropdown.clear_options()
         if matches:
-            dd.add_options(
-                [Option(t, id=t.replace("/", "__")) for t in matches])
-            dd.display = True
+            self._dropdown.add_options([
+                Option(t, id=t.replace("/", "__").replace(".", "_"))
+                for t in matches
+            ])
+            self._reposition()
+            self._dropdown.display = True
         else:
-            dd.display = False
+            self._dropdown.display = False
 
     def _hide_dropdown(self) -> None:
-        self.query_one("#topic_dropdown", TopicDropdown).display = False
+        if self._dropdown:
+            self._dropdown.display = False
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "search_input":
@@ -226,34 +265,194 @@ class TopicSearchBar(Vertical):
         if event.input.id == "search_input":
             val = event.value.strip()
             if val:
-                self.post_message(self.Selected(val))
                 self._hide_dropdown()
-
-    def on_option_list_option_selected(
-            self, event: OptionList.OptionSelected) -> None:
-        topic = event.option.prompt  # the label text is the topic name
-        self.query_one("#search_input", Input).value = topic
-        self._hide_dropdown()
-        self.post_message(self.Selected(topic))
+                self.post_message(self.Selected(val))
+                event.input.value = ""
 
     def on_key(self, event) -> None:
-        dd = self.query_one("#topic_dropdown", TopicDropdown)
-        if not dd.display:
+        if self._dropdown is None or not self._dropdown.display:
             return
         if event.key == "escape":
             self._hide_dropdown()
             event.stop()
         elif event.key == "down":
-            dd.focus()
+            self._dropdown.focus()
             event.stop()
 
     def clear_input(self) -> None:
-        self.query_one("#search_input", Input).value = ""
+        try:
+            self.query_one("#search_input", Input).value = ""
+        except NoMatches:
+            pass
         self._hide_dropdown()
 
 
 # ---------------------------------------------------------------------------
-# Canvas + supporting widgets
+# Pinned topic chip
+# ---------------------------------------------------------------------------
+
+
+class TopicChip(Widget):
+    """Focusable chip. Del/x/backspace unpins. Click to focus, click again to unpin."""
+
+    CAN_FOCUS = True
+
+    DEFAULT_CSS = """
+    TopicChip {
+        width: auto;
+        height: 1;
+        padding: 0 1;
+        margin-right: 1;
+        background: $surface-darken-1;
+    }
+    TopicChip:focus {
+        background: $accent-darken-2;
+    }
+    """
+
+    class UnpinRequested(Message):
+
+        def __init__(self, topic: str) -> None:
+            super().__init__()
+            self.topic = topic
+
+    def __init__(self, topic: str, color: str, **kwargs):
+        super().__init__(**kwargs)
+        self._topic = topic
+        self._color = color
+
+    def render(self) -> Text:
+        t = Text(no_wrap=True)
+        t.append("━ ", style=Style(color=self._color))
+        label = self._topic.split("/")[-1] or self._topic
+        t.append(label, style=Style(color=self._color, bold=self.has_focus))
+        t.append(
+            " [×]",
+            style=Style(color="bright_red" if self.has_focus else "grey42"))
+        return t
+
+    def on_focus(self) -> None:
+        self.refresh()
+
+    def on_blur(self) -> None:
+        self.refresh()
+
+    def on_key(self, event) -> None:
+        if event.key in ("delete", "x", "backspace"):
+            self.post_message(self.UnpinRequested(self._topic))
+            event.stop()
+
+    def on_click(self) -> None:
+        if self.has_focus:
+            self.post_message(self.UnpinRequested(self._topic))
+        else:
+            self.focus()
+
+
+# ---------------------------------------------------------------------------
+# Chip bar
+# ---------------------------------------------------------------------------
+
+
+class PinnedTopicsBar(ScrollableContainer):
+    """
+    Horizontal row of TopicChips.
+    ←/→ navigates between chips. Del/x/backspace on focused chip unpins it.
+    Only rebuilds DOM when the list of pinned topics actually changes.
+    """
+
+    DEFAULT_CSS = """
+    PinnedTopicsBar {
+        height: 1;
+        layout: horizontal;
+        overflow-x: auto;
+        overflow-y: hidden;
+        background: $surface-darken-1;
+        padding: 0 1;
+    }
+    """
+
+    class UnpinRequested(Message):
+
+        def __init__(self, topic: str) -> None:
+            super().__init__()
+            self.topic = topic
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._current_topics: List[str] = []
+
+    def set_chips(self, items: List[Tuple[str, str]]) -> None:
+        new_topics = [t for t, _ in items]
+        if new_topics == self._current_topics:
+            return  # No change — skip DOM update, focus is preserved
+
+        # Remember which chip was focused so we can restore it
+        focused = self.app.focused
+        focused_topic: Optional[str] = (focused._topic if isinstance(
+            focused, TopicChip) else None)
+
+        self._current_topics = new_topics
+        new_set = set(new_topics)
+
+        # Remove chips that are no longer pinned
+        for chip in list(self.query(TopicChip)):
+            if chip._topic not in new_set:
+                chip.remove()
+
+        # Remove the empty-hint if it exists
+        try:
+            self.query_one("#no_topics_hint").remove()
+        except NoMatches:
+            pass
+
+        if not items:
+            self.mount(
+                Static(
+                    "[dim]No topics pinned — search above to pin[/dim]",
+                    id="no_topics_hint",
+                ))
+            return
+
+        # Add chips that are newly pinned
+        existing_topics = {c._topic for c in self.query(TopicChip)}
+        for topic, color in items:
+            if topic not in existing_topics:
+                chip_id = "chip_" + topic.replace("/", "__").replace(".", "_")
+                self.mount(TopicChip(topic, color, id=chip_id))
+
+        # Restore focus
+        if focused_topic and focused_topic in new_set:
+            chip_id = "#chip_" + focused_topic.replace("/", "__").replace(
+                ".", "_")
+            try:
+                self.query_one(chip_id, TopicChip).focus()
+            except NoMatches:
+                pass
+
+    def on_topic_chip_unpin_requested(self,
+                                      event: TopicChip.UnpinRequested) -> None:
+        self.post_message(self.UnpinRequested(event.topic))
+        event.stop()
+
+    def on_key(self, event) -> None:
+        chips = list(self.query(TopicChip))
+        if not chips:
+            return
+        focused = self.app.focused
+        if focused not in chips:
+            return
+        idx = chips.index(focused)
+        if event.key == "left" and idx > 0:
+            chips[idx - 1].focus()
+            event.stop()
+        elif event.key == "right" and idx < len(chips) - 1:
+            chips[idx + 1].focus()
+            event.stop()
+
+
+# ---------------------------------------------------------------------------
+# PlotCanvas
 # ---------------------------------------------------------------------------
 
 
@@ -271,7 +470,6 @@ class PlotCanvas(Static):
         super().__init__("", **kwargs)
         self._store = store
         self._window = 30
-        self._legend_items: List[Tuple[str, str]] = []
 
     def set_window(self, w: int) -> None:
         self._window = w
@@ -282,29 +480,16 @@ class PlotCanvas(Static):
         cw = max(self.size.width, 10)
         ch = max(self.size.height, 4)
         self.update(render_plot_text(series, markers, self._window, cw, ch))
-        self._legend_items = [(t.split("/")[-1]
-                               or t, _COLORS[i % len(_COLORS)])
-                              for i, t in enumerate(series.keys())]
 
-    def get_legend(self) -> List[Tuple[str, str]]:
-        return self._legend_items
+    def get_pinned_with_colors(self) -> List[Tuple[str, str]]:
+        series = self._store.snapshot_plot(window_seconds=self._window)
+        return [(t, _COLORS[i % len(_COLORS)])
+                for i, t in enumerate(series.keys())]
 
 
-class LegendBar(Static):
-    DEFAULT_CSS = """
-    LegendBar { height: 1; padding: 0 1; background: $surface-darken-1; }
-    """
-
-    def set_legend(self, items: List[Tuple[str, str]]) -> None:
-        t = Text()
-        for i, (name, color) in enumerate(items):
-            if i:
-                t.append("   ")
-            t.append("━ ", style=Style(color=color))
-            t.append(name, style=Style(color=color))
-        if not items:
-            t.append("No topics pinned", style="dim")
-        self.update(t)
+# ---------------------------------------------------------------------------
+# VarianceTable
+# ---------------------------------------------------------------------------
 
 
 class VarianceTable(Static):
@@ -343,41 +528,24 @@ class VarianceTable(Static):
 
 
 # ---------------------------------------------------------------------------
-# Control bar (pin/unpin/window buttons)
-# ---------------------------------------------------------------------------
-
-
-class PlotControls(Horizontal):
-    DEFAULT_CSS = """
-    PlotControls {
-        height: 3;
-        padding: 0 1;
-    }
-    PlotControls Button { width: auto; margin-left: 1; }
-    #unpin_btn  { width: 14; }
-    #window_btn { width: 20; }
-    """
-
-    def compose(self) -> ComposeResult:
-        yield Button("Unpin Ctrl+D", id="unpin_btn", variant="warning")
-        yield Button("Window 30s Ctrl+W", id="window_btn", variant="default")
-
-
-# ---------------------------------------------------------------------------
 # PlotPanel
 # ---------------------------------------------------------------------------
 
 
 class PlotPanel(Widget):
     BINDINGS = [
-        Binding("ctrl+n", "pin", "Pin topic"),
-        Binding("ctrl+d", "unpin", "Unpin topic"),
         Binding("ctrl+w", "cycle_window", "Cycle window"),
+        Binding("ctrl+g", "focus_chips", "Go to chips"),
     ]
 
     DEFAULT_CSS = """
     PlotPanel { height: 1fr; }
-    #controls_row { height: 3; padding: 0 1; }
+    #controls_row {
+        height: 3;
+        padding: 0 1;
+    }
+    #controls_row Button { width: auto; margin-left: 1; }
+    #window_btn { width: 20; }
     """
 
     def __init__(self, store: DataStore, bridge, **kwargs):
@@ -390,11 +558,10 @@ class PlotPanel(Widget):
     def compose(self) -> ComposeResult:
         with Horizontal(id="controls_row"):
             yield TopicSearchBar(self._store, id="topic_search")
-            yield Button("Unpin Ctrl+D", id="unpin_btn", variant="warning")
             yield Button(f"Window {self._window}s Ctrl+W",
                          id="window_btn",
                          variant="default")
-        yield LegendBar(id="legend_bar")
+        yield PinnedTopicsBar(id="pinned_bar")
         yield PlotCanvas(self._store, id="plot_canvas")
         yield VarianceTable(id="variance_table")
 
@@ -402,47 +569,38 @@ class PlotPanel(Widget):
         self.set_interval(1.0, self._refresh)
 
     # -----------------------------------------------------------------------
-    # Topic search events
+    # Events
     # -----------------------------------------------------------------------
 
     def on_topic_search_bar_selected(self,
                                      event: TopicSearchBar.Selected) -> None:
-        """User selected a topic from the dropdown — pin it."""
         if self._bridge:
             self._bridge.pin_plot_topic(event.topic)
+        else:
+            self._store.add_plot_topic(event.topic)
         self.query_one("#topic_search", TopicSearchBar).clear_input()
 
-    # -----------------------------------------------------------------------
-    # Button / keyboard actions
-    # -----------------------------------------------------------------------
+    def on_pinned_topics_bar_unpin_requested(
+            self, event: PinnedTopicsBar.UnpinRequested) -> None:
+        if self._bridge:
+            self._bridge.unpin_plot_topic(event.topic)
+        else:
+            self._store.remove_plot_topic(event.topic)
 
-    def action_pin(self) -> None:
-        try:
-            inp = self.query_one("#search_input", Input)
-            topic = inp.value.strip()
-            if topic and self._bridge:
-                self._bridge.pin_plot_topic(topic)
-                self.query_one("#topic_search", TopicSearchBar).clear_input()
-        except NoMatches:
-            pass
-
-    def action_unpin(self) -> None:
-        try:
-            inp = self.query_one("#search_input", Input)
-            topic = inp.value.strip()
-            if topic and self._bridge:
-                self._bridge.unpin_plot_topic(topic)
-                self.query_one("#topic_search", TopicSearchBar).clear_input()
-        except NoMatches:
-            pass
+    # -----------------------------------------------------------------------
+    # Actions
+    # -----------------------------------------------------------------------
 
     def action_cycle_window(self) -> None:
         self._cycle_window()
 
+    def action_focus_chips(self) -> None:
+        chips = list(self.query(TopicChip))
+        if chips:
+            chips[0].focus()
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "unpin_btn":
-            self.action_unpin()
-        elif event.button.id == "window_btn":
+        if event.button.id == "window_btn":
             self._cycle_window()
 
     def _cycle_window(self) -> None:
@@ -460,8 +618,10 @@ class PlotPanel(Widget):
         canvas = self.query_one("#plot_canvas", PlotCanvas)
         canvas.set_window(self._window)
         canvas.refresh_plot()
-        self.query_one("#legend_bar",
-                       LegendBar).set_legend(canvas.get_legend())
+
+        pinned = canvas.get_pinned_with_colors()
+        self.query_one("#pinned_bar", PinnedTopicsBar).set_chips(pinned)
+
         series = self._store.snapshot_plot(window_seconds=self._window)
         markers = self._store.snapshot_param_changes()
         self.query_one("#variance_table",
