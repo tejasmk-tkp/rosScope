@@ -12,7 +12,6 @@ from core.proc_utils import MemTrend
 
 _SPARK_CHARS = " ▁▂▃▄▅▆▇█"
 
-
 def _sparkline(values, width: int = 10, max_val: float = 100.0) -> str:
     if not values:
         return " " * width
@@ -26,14 +25,12 @@ def _sparkline(values, width: int = 10, max_val: float = 100.0) -> str:
         chars.append(_SPARK_CHARS[idx])
     return "".join(chars)
 
-
 def _trend_cell(trend: MemTrend) -> Text:
     if trend == MemTrend.GROWING:
         return Text("↑ GROWING", style="bold red")
     if trend == MemTrend.HIGH:
         return Text("● HIGH", style="yellow")
     return Text("✓ stable", style="dim green")
-
 
 def _cpu_cell(pct: float) -> Text:
     if pct >= 80:
@@ -42,7 +39,6 @@ def _cpu_cell(pct: float) -> Text:
         return Text(f"{pct:5.1f}%", style="yellow")
     return Text(f"{pct:5.1f}%", style="green")
 
-
 def _mem_cell(mb: float) -> Text:
     if mb >= 512:
         return Text(f"{mb:7.1f} MB", style="yellow")
@@ -50,6 +46,7 @@ def _mem_cell(mb: float) -> Text:
 
 
 class NodeOverviewPanel(Widget):
+
     DEFAULT_CSS = """
     NodeOverviewPanel {
         height: 1fr;
@@ -60,16 +57,14 @@ class NodeOverviewPanel(Widget):
     def __init__(self, store: DataStore, **kwargs):
         super().__init__(**kwargs)
         self._store = store
-        self._ck: dict = {}  # label -> ColumnKey
+        self._ck: dict = {}   # label -> ColumnKey
 
     def compose(self) -> ComposeResult:
         yield DataTable(id="node_table", zebra_stripes=True, cursor_type="row")
 
     def on_mount(self) -> None:
         table = self.query_one("#node_table", DataTable)
-        labels = [
-            "Node", "PID", "CPU%", "CPU spark", "Memory", "Mem spark", "Trend"
-        ]
+        labels = ["Node", "PID", "CPU%", "CPU spark", "Memory", "Mem spark", "Trend"]
         keys = table.add_columns(*labels)
         self._ck = dict(zip(labels, keys))
         self.set_interval(1.0, self._refresh_table)
@@ -88,8 +83,7 @@ class NodeOverviewPanel(Widget):
 
         for node in nodes:
             cpu_spark = _sparkline(node.cpu_sparkline, width=12, max_val=100.0)
-            mem_spark = _sparkline(node.mem_sparkline,
-                                   width=12,
+            mem_spark = _sparkline(node.mem_sparkline, width=12,
                                    max_val=max(512.0, node.memory_mb or 1.0))
             pid_str = str(node.pid) if node.pid else Text("?", style="dim")
 
@@ -104,10 +98,10 @@ class NodeOverviewPanel(Widget):
             )
 
             if node.name in existing_values:
-                table.update_cell(node.name, self._ck["CPU%"], row[2])
+                table.update_cell(node.name, self._ck["CPU%"],      row[2])
                 table.update_cell(node.name, self._ck["CPU spark"], row[3])
-                table.update_cell(node.name, self._ck["Memory"], row[4])
+                table.update_cell(node.name, self._ck["Memory"],    row[4])
                 table.update_cell(node.name, self._ck["Mem spark"], row[5])
-                table.update_cell(node.name, self._ck["Trend"], row[6])
+                table.update_cell(node.name, self._ck["Trend"],     row[6])
             else:
                 table.add_row(*row, key=node.name)
