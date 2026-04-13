@@ -104,8 +104,8 @@ def render_plot_text(series, markers, window, cw, ch) -> Text:
         layer = _make_canvas(pcw, ch)
         pts = [p for p in points if p.timestamp >= t0]
         for i in range(len(pts) - 1):
-            xn0 = (pts[i].timestamp - t0) / window
-            xn1 = (pts[i + 1].timestamp - t0) / window
+            xn0 = 1.0 - (now - pts[i].timestamp) / window
+            xn1 = 1.0 - (now - pts[i + 1].timestamp) / window
             _draw_line_on_canvas(
                 layer, xn0, pts[i].value, xn1, pts[i + 1].value, pcw, ch, ymin, ymax
             )
@@ -114,7 +114,7 @@ def render_plot_text(series, markers, window, cw, ch) -> Text:
     mcanvas = _make_canvas(pcw, ch)
     for m in markers:
         if t0 <= m.timestamp <= now:
-            _draw_vline(mcanvas, (m.timestamp - t0) / window, pcw, ch)
+            _draw_vline(mcanvas, 1.0 - (now - m.timestamp) / window, pcw, ch)
 
     tick_rows = {0, ch // 4, ch // 2, 3 * ch // 4, ch - 1}
 
