@@ -158,15 +158,6 @@ class SearchBar(Widget):
     DEFAULT_CSS = """
     SearchBar { height: 3; width: 1fr; }
     #sb_input { height: 3; width: 1fr; }
-    SearchBar > OptionList {
-        display: none;
-        layer: above;
-        offset: 0 3;
-        width: 1fr;
-        max-height: 10;
-        border: tall $accent;
-        background: $surface;
-    }
     """
 
     class Chosen(Message):
@@ -174,13 +165,14 @@ class SearchBar(Widget):
         def __init__(self, value: str, source_id: str = "") -> None:
             super().__init__()
             self.value = value
-            self.source_id = source_id  # id() of the SearchBar that fired
+            self.source_id = source_id
 
     def __init__(self, placeholder: str = "search…", **kwargs):
         super().__init__(**kwargs)
         self._placeholder = placeholder
         self._options: List[str] = []
         self._matches: List[str] = []
+        self._dd = None
 
     def compose(self) -> ComposeResult:
         yield Input(placeholder=self._placeholder, id="sb_input")
@@ -188,16 +180,38 @@ class SearchBar(Widget):
     def on_mount(self) -> None:
         from textual.widgets import OptionList as OL
 
-        # Mount inside self so OptionList.OptionSelected bubbles through SearchBar
+        # Mount on app so dropdown floats freely above all widgets.
+        # Dispatch back to us via _search_bar_owner set on the _dd object.
         self._dd = OL(id=f"sb_dd_{id(self)}")
-        self.mount(self._dd)
+        self._dd.display = False
+        self._dd.styles.max_height = 10
+        self._dd._search_bar_owner = self
+        self.app.mount(self._dd)
+
+    def on_unmount(self) -> None:
+        if self._dd is not None:
+            try:
+                self._dd.remove()
+            except Exception:
+                pass
 
     def set_options(self, options: List[str]) -> None:
         self._options = options
 
+    def _reposition(self) -> None:
+        try:
+            inp = self.query_one("#sb_input", Input)
+            off = inp.screen_offset
+            self._dd.styles.offset = (off.x, off.y + 3)
+            self._dd.styles.width = max(inp.size.width, 40)
+        except Exception:
+            pass
+
     def _show(self, query: str) -> None:
         from textual.widgets._option_list import Option
 
+        if self._dd is None:
+            return
         self._matches = (
             [o for o in self._options
              if query.lower() in o.lower()] if query else list(self._options))
@@ -207,12 +221,14 @@ class SearchBar(Widget):
                 Option(o, id=o.replace("/", "__").replace(".", "_"))
                 for o in self._matches
             ])
+            self._reposition()
             self._dd.display = True
         else:
             self._dd.display = False
 
     def _hide(self) -> None:
-        self._dd.display = False
+        if self._dd is not None:
+            self._dd.display = False
         self._matches = []
 
     def _choose(self, value: str) -> None:
@@ -230,30 +246,23 @@ class SearchBar(Widget):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "sb_input":
             return
-        # If dropdown is open, pick the highlighted item (or first match)
-        if self._dd.display and self._matches:
+        if self._dd is not None and self._dd.display and self._matches:
             highlighted = self._dd.highlighted
             pick = (self._matches[highlighted]
                     if highlighted is not None else self._matches[0])
             self._choose(pick)
             event.stop()
         elif event.value.strip():
-            # Dropdown not open — submit raw text as-is (fallback)
             self._choose(event.value.strip())
 
     def on_key(self, event) -> None:
-        if not self._dd.display:
+        if self._dd is None or not self._dd.display:
             return
         if event.key == "escape":
             self._hide()
             event.stop()
         elif event.key == "down":
             self._dd.focus()
-            event.stop()
-
-    def on_option_list_option_selected(self, event) -> None:
-        if event.option_list is self._dd:
-            self._choose(str(event.option.prompt))
             event.stop()
 
 
@@ -676,3 +685,13 @@ class InteractorPanel(Widget):
             self.query_one("#srv_search").query_one("#sb_input", Input).focus()
         except NoMatches:
             pass
+
+    def on_option_list_option_selected(self, event) -> None:
+        # The SearchBar mounts its _dd OptionList on the app, so
+        # OptionList.OptionSelected bubbles to the app, not through SearchBar.
+        # We stored _search_bar_owner on the _dd so we can dispatch back here.
+        owner: Optional[SearchBar] = getattr(event.option_list,
+                                             "_search_bar_owner", None)
+        if owner is not None:
+            owner._choose(str(event.option.prompt))
+            event.stop()
