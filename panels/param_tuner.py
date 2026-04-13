@@ -112,11 +112,16 @@ class ParamTunerPanel(Widget):
         self._describing: Set[str] = set()
 
     def compose(self) -> ComposeResult:
-        yield Select([], prompt="Select a node… (Tab to reach)", id="node_select")
-        yield DataTable(id="param_table", zebra_stripes=True, cursor_type="row")
+        yield Select([],
+                     prompt="Select a node… (Tab to reach)",
+                     id="node_select")
+        yield DataTable(id="param_table",
+                        zebra_stripes=True,
+                        cursor_type="row")
         with Horizontal(id="edit_row"):
             yield Label("No param selected", id="edit_label")
-            yield Input(placeholder="new value… then Enter to apply", id="edit_input")
+            yield Input(placeholder="new value… then Enter to apply",
+                        id="edit_input")
         yield StatusBar(
             "  Enter: Apply   Ctrl+Z: Undo   Ctrl+E: Export YAML   up/down: Navigate",
             id="hint_bar",
@@ -196,26 +201,24 @@ class ParamTunerPanel(Widget):
             # Refresh table cell and edit row
             self.app.call_from_thread(self._update_rw_cell, node, param, ro)
 
-        threading.Thread(target=_worker, daemon=True, name=f"ro_{param[:20]}").start()
+        threading.Thread(target=_worker, daemon=True,
+                         name=f"ro_{param[:20]}").start()
 
-    def _update_rw_cell(self, node: str, param: str, ro: Optional[bool]) -> None:
+    def _update_rw_cell(self, node: str, param: str,
+                        ro: Optional[bool]) -> None:
         """Called from thread after describe completes — update cell and edit row."""
         if ro is None:
             return
         try:
             table = self.query_one("#param_table", DataTable)
-            rw_text = (
-                Text("RO", style="bold red") if ro else Text("RW", style="bold green")
-            )
+            rw_text = (Text("RO", style="bold red")
+                       if ro else Text("RW", style="bold green"))
             table.update_cell(param, self._ck["R/W"], rw_text)
         except Exception:
             pass
         # Also update edit row if this is the currently selected param
-        if (
-            self._selected_param
-            and self._selected_param.name == param
-            and self._selected_node == node
-        ):
+        if (self._selected_param and self._selected_param.name == param
+                and self._selected_node == node):
             self._update_edit_row(ro)
 
     def _update_edit_row(self, ro: bool) -> None:
@@ -225,14 +228,12 @@ class ParamTunerPanel(Widget):
         if ro:
             self.query_one("#edit_label", Label).update(
                 f"[red]RO  {self._selected_param.name}[/red] "
-                f"[dim]({self._selected_param.type_name})  read-only[/dim]"
-            )
+                f"[dim]({self._selected_param.type_name})  read-only[/dim]")
             inp.disabled = True
         else:
             self.query_one("#edit_label", Label).update(
                 f"[cyan]{self._selected_param.name}[/cyan] "
-                f"[dim]({self._selected_param.type_name})[/dim]"
-            )
+                f"[dim]({self._selected_param.type_name})[/dim]")
             inp.disabled = False
 
     # -----------------------------------------------------------------------
@@ -293,10 +294,14 @@ class ParamTunerPanel(Widget):
             self._bridge.fetch_params(self._selected_node)
         self._set_status(f"Fetching params for {self._selected_node}…")
 
-    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+    def on_data_table_row_highlighted(self,
+                                      event: DataTable.RowHighlighted) -> None:
         if not event.row_key or not self._selected_node:
             return
-        params = {p.name: p for p in self._store.snapshot_params(self._selected_node)}
+        params = {
+            p.name: p
+            for p in self._store.snapshot_params(self._selected_node)
+        }
         self._selected_param = params.get(event.row_key.value)
         if not self._selected_param:
             return
@@ -309,10 +314,10 @@ class ParamTunerPanel(Widget):
             # Not cached yet — show as editable optimistically, kick off fetch
             self.query_one("#edit_label", Label).update(
                 f"[cyan]{self._selected_param.name}[/cyan] "
-                f"[dim]({self._selected_param.type_name})  checking…[/dim]"
-            )
+                f"[dim]({self._selected_param.type_name})  checking…[/dim]")
             inp.disabled = False
-            self._fetch_readonly_async(self._selected_node, self._selected_param.name)
+            self._fetch_readonly_async(self._selected_node,
+                                       self._selected_param.name)
         else:
             self._update_edit_row(ro)
 
@@ -340,8 +345,7 @@ class ParamTunerPanel(Widget):
         new_val = _coerce_value(raw, self._selected_param.type_name)
         old_val = self._selected_param.value
         self._history.append(
-            (self._selected_node, self._selected_param.name, old_val, new_val)
-        )
+            (self._selected_node, self._selected_param.name, old_val, new_val))
         self._set_status(f"Setting {self._selected_param.name} = {new_val}…")
 
         param_name = self._selected_param.name
@@ -352,19 +356,20 @@ class ParamTunerPanel(Widget):
             else:
                 msg = f"  Failed: {error}"
                 # Runtime revealed it's read-only — cache and update UI
-                if "read-only" in error.lower() or "cannot be set" in error.lower():
+                if "read-only" in error.lower(
+                ) or "cannot be set" in error.lower():
                     node = self._selected_node
                     if node not in self._readonly_cache:
                         self._readonly_cache[node] = {}
                     self._readonly_cache[node][param_name] = True
-                    self.app.call_from_thread(
-                        self._update_rw_cell, node, param_name, True
-                    )
+                    self.app.call_from_thread(self._update_rw_cell, node,
+                                              param_name, True)
             self.app.call_from_thread(self._set_status, msg)
 
-        self._bridge.set_param(
-            self._selected_node, self._selected_param.name, new_val, on_done=on_done
-        )
+        self._bridge.set_param(self._selected_node,
+                               self._selected_param.name,
+                               new_val,
+                               on_done=on_done)
 
     def _undo_last(self) -> None:
         if not self._history or not self._bridge:
@@ -374,11 +379,8 @@ class ParamTunerPanel(Widget):
         self._set_status(f"Undoing {param} -> {old_val}…")
 
         def on_done(success: bool, error: str) -> None:
-            msg = (
-                f"  Undone: {param} = {old_val}"
-                if success
-                else f"  Undo failed: {error}"
-            )
+            msg = (f"  Undone: {param} = {old_val}"
+                   if success else f"  Undo failed: {error}")
             self.app.call_from_thread(self._set_status, msg)
 
         self._bridge.set_param(node, param, old_val, on_done=on_done)
@@ -392,7 +394,22 @@ class ParamTunerPanel(Widget):
             self._set_status("No params to export.")
             return
         node_bare = self._selected_node.lstrip("/").replace("/", "_")
-        data = {node_bare: {"ros__parameters": {p.name: p.value for p in params}}}
+
+        # Re-nest dot-separated flat keys back into dicts for valid ROS YAML.
+        # e.g. "depth.max_depth" -> {"depth": {"max_depth": ...}}
+        def _nest(flat: dict) -> dict:
+            out: dict = {}
+            for key, val in flat.items():
+                parts = key.split(".")
+                d = out
+                for part in parts[:-1]:
+                    d = d.setdefault(part, {})
+                d[parts[-1]] = val
+            return out
+
+        flat = {p.name: p.value for p in params}
+        nested = _nest(flat)
+        data = {node_bare: {"ros__parameters": nested}}
         ts = time.strftime("%Y%m%d_%H%M%S")
         filename = f"params_{node_bare}_{ts}.yaml"
         Path(filename).write_text(yaml.dump(data, default_flow_style=False))
@@ -400,5 +417,4 @@ class ParamTunerPanel(Widget):
 
     def _set_status(self, msg: str) -> None:
         self.query_one("#hint_bar", StatusBar).update(
-            f"{msg}   [dim]Enter: Apply  Ctrl+Z: Undo  Ctrl+E: Export[/dim]"
-        )
+            f"{msg}   [dim]Enter: Apply  Ctrl+Z: Undo  Ctrl+E: Export[/dim]")

@@ -71,7 +71,8 @@ _INCOMPATIBLE_PAIRS = {
 
 
 def _detect_qos_mismatch(pub_reliability: str, sub_reliability: str) -> bool:
-    return (pub_reliability.lower(), sub_reliability.lower()) in _INCOMPATIBLE_PAIRS
+    return (pub_reliability.lower(),
+            sub_reliability.lower()) in _INCOMPATIBLE_PAIRS
 
 
 # ---------------------------------------------------------------------------
@@ -132,9 +133,11 @@ class RosBridge:
         if self._thread:
             self._thread.join(timeout=5.0)
 
-    def set_param(
-        self, node: str, param: str, value: Any, on_done: Optional[callable] = None
-    ) -> None:
+    def set_param(self,
+                  node: str,
+                  param: str,
+                  value: Any,
+                  on_done: Optional[callable] = None) -> None:
         """
         Request a parameter change. Non-blocking — queued for the spin thread.
         on_done(success: bool, error: str) called on completion (from spin thread).
@@ -147,28 +150,32 @@ class RosBridge:
         # Actual subscription happens in _refresh_plot_subscriptions()
         # which runs on the next discovery cycle inside the spin thread.
 
-    def unpin_plot_topic(self, topic: str, field: Optional[str] = None) -> None:
+    def unpin_plot_topic(self,
+                         topic: str,
+                         field: Optional[str] = None) -> None:
         self._store.remove_plot_topic(topic, field)
 
     def list_services(self) -> None:
         """Refresh service list — queued for spin thread."""
         self._param_set_queue.put(("__list_services__", None, None, None))
 
-    def publish_topic(
-        self, topic: str, msg_type_str: str, field_values: dict, on_done=None
-    ) -> None:
+    def publish_topic(self,
+                      topic: str,
+                      msg_type_str: str,
+                      field_values: dict,
+                      on_done=None) -> None:
         """Publish a single message to a topic."""
         self._param_set_queue.put(
-            ("__pub__", topic, (msg_type_str, field_values), on_done)
-        )
+            ("__pub__", topic, (msg_type_str, field_values), on_done))
 
-    def call_service(
-        self, service: str, srv_type_str: str, field_values: dict, on_done=None
-    ) -> None:
+    def call_service(self,
+                     service: str,
+                     srv_type_str: str,
+                     field_values: dict,
+                     on_done=None) -> None:
         """Call a service with given request fields."""
         self._param_set_queue.put(
-            ("__srv__", service, (srv_type_str, field_values), on_done)
-        )
+            ("__srv__", service, (srv_type_str, field_values), on_done))
 
     def get_msg_fields(self, msg_type_str: str) -> List[dict]:
         """Synchronously introspect message fields. Returns list of field dicts."""
@@ -192,11 +199,8 @@ class RosBridge:
         Request a param refresh for a node.
         Queued so it runs in the spin thread safely.
         """
-        if (
-            not ros_node
-            or not isinstance(ros_node, str)
-            or not ros_node.startswith("/")
-        ):
+        if (not ros_node or not isinstance(ros_node, str)
+                or not ros_node.startswith("/")):
             return
         self._param_set_queue.put(("__fetch__", ros_node, None, None))
 
@@ -341,13 +345,14 @@ class RosBridge:
             node_names = self._get_node_names()
             self._resource_monitor.update(node_names)
             all_nodes = self._resource_monitor.all_nodes()
-            self._store.update_node_resources(all_nodes, self._resource_monitor.system)
+            self._store.update_node_resources(all_nodes,
+                                              self._resource_monitor.system)
             # Feed node plot history
             now = time.monotonic()
             for name, res in all_nodes.items():
-                self._store.append_node_resource_point(
-                    name, now, res.cpu_percent, res.memory_mb
-                )
+                self._store.append_node_resource_point(name, now,
+                                                       res.cpu_percent,
+                                                       res.memory_mb)
         except Exception as e:
             log.debug(f"Resource tick error: {e}")
 
@@ -430,7 +435,8 @@ class RosBridge:
             # Publisher / subscriber counts
             try:
                 pub_info = self._node.get_publishers_info_by_topic(topic_name)
-                sub_info = self._node.get_subscriptions_info_by_topic(topic_name)
+                sub_info = self._node.get_subscriptions_info_by_topic(
+                    topic_name)
             except Exception:
                 pub_info, sub_info = [], []
 
@@ -451,7 +457,8 @@ class RosBridge:
             if sub_info:
                 qos = sub_info[0].qos_profile
                 sub_reliability = str(qos.reliability).split(".")[-1].lower()
-                qos_mismatch = _detect_qos_mismatch(pub_reliability, sub_reliability)
+                qos_mismatch = _detect_qos_mismatch(pub_reliability,
+                                                    sub_reliability)
 
             # Frequency from rolling window
             freq = self._compute_frequency(topic_name)
@@ -507,8 +514,7 @@ class RosBridge:
         # Populate plottable field list on first message (for the field picker UI)
         if topic not in self._store._topic_fields:
             numeric_fields = [
-                f["path"]
-                for f in self._describe_fields(msg)
+                f["path"] for f in self._describe_fields(msg)
                 if f["type"] in ("int", "float")
             ]
             if numeric_fields:
@@ -593,7 +599,10 @@ class RosBridge:
 
         # Derive the set of unique ROS topic names from pinned keys
         pinned_keys = set(self._store.snapshot_plot_topics())
-        pinned_topics = {k.split("::")[0] if "::" in k else k for k in pinned_keys}
+        pinned_topics = {
+            k.split("::")[0] if "::" in k else k
+            for k in pinned_keys
+        }
         subscribed = set(self._plot_subs.keys())
 
         # Topics to add
@@ -683,7 +692,8 @@ class RosBridge:
         )
 
         if result.returncode != 0 or not result.stdout.strip():
-            log.warning(f"param dump failed for {ros_node}: {result.stderr.strip()}")
+            log.warning(
+                f"param dump failed for {ros_node}: {result.stderr.strip()}")
             return
 
         try:
@@ -693,7 +703,8 @@ class RosBridge:
             return
 
         if not isinstance(data, dict):
-            log.warning(f"param dump unexpected type {type(data)} for {ros_node}")
+            log.warning(
+                f"param dump unexpected type {type(data)} for {ros_node}")
             return
 
         # Handle all known output formats:
@@ -709,11 +720,9 @@ class RosBridge:
             node_bare = ros_node.lstrip("/")
             for key, val in data.items():
                 key_bare = str(key).lstrip("/")
-                if isinstance(val, dict) and (
-                    key_bare == node_bare
-                    or key_bare == node_bare.split("/")[-1]
-                    or node_bare.endswith(key_bare)
-                ):
+                if isinstance(val, dict) and (key_bare == node_bare or key_bare
+                                              == node_bare.split("/")[-1]
+                                              or node_bare.endswith(key_bare)):
                     params_dict = val.get("ros__parameters", {})
                     break
             if not params_dict:
@@ -729,8 +738,23 @@ class RosBridge:
             )
             return
 
+        # Flatten nested dicts into dot-separated keys so the tuner panel can
+        # display and edit individual leaf values rather than raw dict blobs.
+        # e.g. {"depth": {"max_depth": 10.0}} -> {"depth.max_depth": 10.0}
+        def _flatten(d: dict, prefix: str = "") -> dict:
+            out = {}
+            for k, v in d.items():
+                full_key = f"{prefix}.{k}" if prefix else k
+                if isinstance(v, dict):
+                    out.update(_flatten(v, full_key))
+                else:
+                    out[full_key] = v
+            return out
+
+        flat = _flatten(params_dict)
+
         snapshots: Dict[str, ParamSnapshot] = {}
-        for pname, pval in params_dict.items():
+        for pname, pval in flat.items():
             snapshots[pname] = ParamSnapshot(
                 node=ros_node,
                 name=pname,
@@ -738,18 +762,22 @@ class RosBridge:
                 type_name=type(pval).__name__,
             )
         self._store.update_params(ros_node, snapshots)
-        log.info(f"Loaded {len(snapshots)} params for {ros_node}")
+        log.info(
+            f"Loaded {len(snapshots)} params for {ros_node} (flattened from {len(params_dict)} top-level keys)"
+        )
 
-    def _do_set_param(
-        self, ros_node: str, param: str, value: Any, on_done: Optional[callable]
-    ) -> None:
+    def _do_set_param(self, ros_node: str, param: str, value: Any,
+                      on_done: Optional[callable]) -> None:
         """
         Set a parameter via ros2 param set CLI.
         Records a change marker in the store for plot overlay.
         """
         # Get old value for the marker
         old_val = None
-        existing = {p.name: p.value for p in self._store.snapshot_params(ros_node)}
+        existing = {
+            p.name: p.value
+            for p in self._store.snapshot_params(ros_node)
+        }
         old_val = existing.get(param)
 
         try:
@@ -781,8 +809,7 @@ class RosBridge:
                     param=param,
                     old_value=old_val,
                     new_value=value,
-                )
-            )
+                ))
             # Refresh params for this node
             self._do_fetch_params(ros_node)
             log.info(f"Set {ros_node} {param} = {value}")
@@ -805,18 +832,17 @@ class RosBridge:
 
             svc_list = self._node.get_service_names_and_types()
             services = {
-                name: ServiceSnapshot(
-                    name=name, srv_type=types[0] if types else "unknown"
-                )
+                name:
+                ServiceSnapshot(name=name,
+                                srv_type=types[0] if types else "unknown")
                 for name, types in svc_list
             }
             self._store.update_services(services)
         except Exception as e:
             log.debug(f"Service discovery error: {e}")
 
-    def _do_publish(
-        self, topic: str, msg_type_str: str, field_values: dict, on_done
-    ) -> None:
+    def _do_publish(self, topic: str, msg_type_str: str, field_values: dict,
+                    on_done) -> None:
         try:
             msg_class = self._import_msg_type(msg_type_str)
             if msg_class is None:
@@ -834,14 +860,14 @@ class RosBridge:
             if on_done:
                 on_done(False, str(e))
 
-    def _do_call_service(
-        self, service: str, srv_type_str: str, field_values: dict, on_done
-    ) -> None:
+    def _do_call_service(self, service: str, srv_type_str: str,
+                         field_values: dict, on_done) -> None:
         try:
             srv_class = self._import_srv_type(srv_type_str)
             if srv_class is None:
                 if on_done:
-                    on_done(False, f"Unknown service type: {srv_type_str}", None)
+                    on_done(False, f"Unknown service type: {srv_type_str}",
+                            None)
                 return
             req = srv_class.Request()
             self._set_msg_fields(req, field_values)
@@ -855,7 +881,9 @@ class RosBridge:
             # Spin until done (blocking but in spin thread so safe)
             import rclpy
 
-            rclpy.spin_until_future_complete(self._node, future, timeout_sec=5.0)
+            rclpy.spin_until_future_complete(self._node,
+                                             future,
+                                             timeout_sec=5.0)
             self._node.destroy_client(cli)
             if future.done():
                 result = future.result()
@@ -881,9 +909,10 @@ class RosBridge:
         except (ImportError, AttributeError):
             return None
 
-    def _describe_fields(
-        self, obj: Any, prefix: str = "", depth: int = 0
-    ) -> List[dict]:
+    def _describe_fields(self,
+                         obj: Any,
+                         prefix: str = "",
+                         depth: int = 0) -> List[dict]:
         """Return list of {path, type, default} for all leaf fields of a msg."""
         if depth > 4:
             return []
@@ -923,7 +952,8 @@ class RosBridge:
                 leaf = parts[-1]
                 current = getattr(obj, leaf)
                 if isinstance(current, bool):
-                    setattr(obj, leaf, str(raw_val).lower() in ("true", "1", "yes"))
+                    setattr(obj, leaf,
+                            str(raw_val).lower() in ("true", "1", "yes"))
                 elif isinstance(current, int):
                     setattr(obj, leaf, int(float(raw_val)))
                 elif isinstance(current, float):
@@ -940,17 +970,15 @@ class RosBridge:
             for transform in msg.transforms:
                 parent = transform.header.frame_id
                 child = transform.child_frame_id
-                stamp_sec = (
-                    transform.header.stamp.sec + transform.header.stamp.nanosec * 1e-9
-                )
+                stamp_sec = (transform.header.stamp.sec +
+                             transform.header.stamp.nanosec * 1e-9)
                 # Age = gap between this stamp and the previous stamp for this edge.
                 # Pure ROS-time delta — no wall clock, no epoch mismatch.
                 key = (parent, child)
                 prev_stamp = self._tf_prev_stamp.get(key)
                 if prev_stamp is not None and stamp_sec > 0:
-                    stamp_age_s = (
-                        stamp_sec - prev_stamp
-                    )  # positive = gap between messages
+                    stamp_age_s = (stamp_sec - prev_stamp
+                                   )  # positive = gap between messages
                 else:
                     stamp_age_s = -1.0  # first message — no previous to diff against
                 if stamp_sec > 0:
@@ -988,6 +1016,7 @@ class RosBridge:
                 f"[rosout_cb] level={msg.level}→{level} name={name!r} text={text!r:.60}"
             )
             self._store.append_log_line(line, level)
-            log.debug(f"[rosout_cb] store total={self._store.total_log_count()}")
+            log.debug(
+                f"[rosout_cb] store total={self._store.total_log_count()}")
         except Exception as e:
             log.error(f"[rosout_cb] error: {e}", exc_info=True)
