@@ -256,14 +256,15 @@ class RosBridge:
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
                 history=HistoryPolicy.KEEP_ALL,
             )
-            self._node.create_subscription(
+            sub = self._node.create_subscription(
                 RosoutMsg,
                 "/rosout",
                 self._rosout_cb,
                 rosout_qos,
             )
+            log.info(f"[rosout] subscription created ok: {sub}")
         except Exception as e:
-            log.warning(f"Could not subscribe to /rosout: {e}")
+            log.error(f"[rosout] subscription FAILED: {e}", exc_info=True)
 
         # Subscribe to /tf and /tf_static
         try:
@@ -980,11 +981,13 @@ class RosBridge:
                 16: "FATAL",
             }
             level = level_map.get(msg.level, f"L{msg.level}")
-            # msg.name is the node name, msg.msg is the log text
             name = getattr(msg, "name", "") or getattr(msg, "logger_name", "?")
             text = getattr(msg, "msg", "") or getattr(msg, "message", "")
-            # Store as "[node_name] message" — panel adds its own timestamp+level badge
             line = f"[{name}] {text}"
+            log.debug(
+                f"[rosout_cb] level={msg.level}→{level} name={name!r} text={text!r:.60}"
+            )
             self._store.append_log_line(line, level)
+            log.debug(f"[rosout_cb] store total={self._store.total_log_count()}")
         except Exception as e:
-            log.debug(f"rosout_cb error: {e}")
+            log.error(f"[rosout_cb] error: {e}", exc_info=True)
