@@ -158,6 +158,15 @@ class SearchBar(Widget):
     DEFAULT_CSS = """
     SearchBar { height: 3; width: 1fr; }
     #sb_input { height: 3; width: 1fr; }
+    SearchBar > OptionList {
+        display: none;
+        layer: above;
+        offset: 0 3;
+        width: 1fr;
+        max-height: 10;
+        border: tall $accent;
+        background: $surface;
+    }
     """
 
     class Chosen(Message):
@@ -181,14 +190,6 @@ class SearchBar(Widget):
 
         # Mount inside self so OptionList.OptionSelected bubbles through SearchBar
         self._dd = OL(id=f"sb_dd_{id(self)}")
-        self._dd.display = False
-        self._dd.styles.layer = "above"
-        self._dd.styles.dock = "top"
-        self._dd.styles.offset = (0, 3)
-        self._dd.styles.width = "1fr"
-        self._dd.styles.max_height = 10
-        self._dd.styles.background = ""
-        self._dd.styles.border = ("tall", "")
         self.mount(self._dd)
 
     def set_options(self, options: List[str]) -> None:
