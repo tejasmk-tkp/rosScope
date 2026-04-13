@@ -239,9 +239,9 @@ class RosBridge:
             self._run_disconnected_loop()
             return
 
-        # Subscribe to /rosout — publishers use TRANSIENT_LOCAL so we must match.
-        # KEEP_ALL on the subscriber side ensures we don't cap the incoming history
-        # buffer ourselves — we let the deque in DataStore control retention.
+        # Subscribe to /rosout — match publisher's TRANSIENT_LOCAL/RELIABLE so we
+        # receive history replayed at connect time. CycloneDDS requires depth=0 with
+        # KEEP_ALL (non-zero depth is rejected and silently drops the subscription).
         try:
             from rclpy.qos import (
                 QoSProfile,
@@ -251,7 +251,7 @@ class RosBridge:
             )
 
             rosout_qos = QoSProfile(
-                depth=1000,
+                depth=0,
                 reliability=ReliabilityPolicy.RELIABLE,
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
                 history=HistoryPolicy.KEEP_ALL,
