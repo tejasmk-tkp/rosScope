@@ -233,13 +233,26 @@ class RosBridge:
             self._run_disconnected_loop()
             return
 
-        # Subscribe to /rosout
+        # Subscribe to /rosout — publishers use TRANSIENT_LOCAL so we must match
         try:
+            from rclpy.qos import (
+                QoSProfile,
+                DurabilityPolicy,
+                ReliabilityPolicy,
+                HistoryPolicy,
+            )
+
+            rosout_qos = QoSProfile(
+                depth=1000,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                history=HistoryPolicy.KEEP_LAST,
+            )
             self._node.create_subscription(
                 RosoutMsg,
                 "/rosout",
                 self._rosout_cb,
-                10,
+                rosout_qos,
             )
         except Exception as e:
             log.warning(f"Could not subscribe to /rosout: {e}")
