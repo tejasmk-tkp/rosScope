@@ -192,6 +192,12 @@ class RosBridge:
         Request a param refresh for a node.
         Queued so it runs in the spin thread safely.
         """
+        if (
+            not ros_node
+            or not isinstance(ros_node, str)
+            or not ros_node.startswith("/")
+        ):
+            return
         self._param_set_queue.put(("__fetch__", ros_node, None, None))
 
     # -----------------------------------------------------------------------
@@ -663,7 +669,7 @@ class RosBridge:
                 ["ros2", "param", "dump", ros_node],
                 capture_output=True,
                 text=True,
-                timeout=8.0,
+                timeout=20.0,
             )
         except Exception as e:
             log.warning(f"param dump failed for {ros_node}: {e}")
@@ -958,9 +964,25 @@ class RosBridge:
 
     def _rosout_cb(self, msg: Any) -> None:
         try:
-            level_map = {10: "DEBUG", 20: "INFO", 30: "WARN", 40: "ERROR", 50: "FATAL"}
-            level = level_map.get(msg.level, "?")
-            line = f"[{level}] [{msg.name}] {msg.msg}"
-            self._store.append_log_line(line)
-        except Exception:
-            pass
+            level_map = {
+                10: "DEBUG",
+                20: "INFO",
+                30: "WARN",
+                40: "ERROR",
+                50: "FATAL",
+                # rcl_interfaces/msg/Log constants (some distros use these)
+                1: "DEBUG",
+                2: "INFO",
+                4: "WARN",
+                8: "ERROR",
+                16: "FATAL",
+            }
+            level = level_map.get(msg.level, f"L{msg.level}")
+            # msg.name is the node name, msg.msg is the log text
+            name = getattr(msg, "name", "") or getattr(msg, "logger_name", "?")
+            text = getattr(msg, "msg", "") or getattr(msg, "message", "")
+            # Store as "[node_name] message" — panel adds its own timestamp+level badge
+            line = f"[{name}] {text}"
+            self._store.append_log_line(line, level)
+        except Exception as e:
+            log.debug(f"rosout_cb error: {e}")
