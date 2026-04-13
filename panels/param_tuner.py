@@ -1,12 +1,15 @@
 """
 panels/param_tuner.py — Parameter Tuner panel.
 Full keyboard navigation. Enter=Apply, Ctrl+Z=Undo, Ctrl+E=Export YAML.
+Read-only params are shown with a lock indicator and blocked from editing.
 """
 
+import subprocess
+import threading
 import time
 import yaml
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from textual.app import ComposeResult
 from textual.widget import Widget
@@ -31,6 +34,34 @@ def _coerce_value(raw: str, type_name: str) -> Any:
         return raw
 
 
+def _fetch_readonly_params(node: str) -> Set[str]:
+    """
+    Run `ros2 param describe <node> --all` and return set of read-only param names.
+    Falls back to empty set on any error.
+    """
+    readonly: Set[str] = set()
+    try:
+        result = subprocess.run(
+            ["ros2", "param", "describe", node, "--all"],
+            capture_output=True,
+            text=True,
+            timeout=12.0,
+        )
+        if result.returncode != 0:
+            return readonly
+        current_param = None
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Parameter name:"):
+                current_param = stripped.split(":", 1)[1].strip()
+            elif stripped.startswith("Read only:") and current_param:
+                if "true" in stripped.lower():
+                    readonly.add(current_param)
+    except Exception:
+        pass
+    return readonly
+
+
 class StatusBar(Static):
     DEFAULT_CSS = """
     StatusBar {
@@ -43,26 +74,31 @@ class StatusBar(Static):
 
 
 class ParamTunerPanel(Widget):
-
     BINDINGS = [
-        Binding("enter",   "apply_param", "Apply",       show=True),
-        Binding("ctrl+z",  "undo_param",  "Undo",        show=True),
-        Binding("ctrl+e",  "export_yaml", "Export YAML", show=True),
-        Binding("up",      "cursor_up",   "Up",          show=False),
-        Binding("down",    "cursor_down", "Down",        show=False),
+        Binding("enter", "apply_param", "Apply", show=True),
+        Binding("ctrl+z", "undo_param", "Undo", show=True),
+        Binding("ctrl+e", "export_yaml", "Export YAML", show=True),
+        Binding("up", "cursor_up", "Up", show=False),
+        Binding("down", "cursor_down", "Down", show=False),
     ]
 
     DEFAULT_CSS = """
     ParamTunerPanel {
         height: 1fr;
         padding: 0 1;
+        layout: vertical;
     }
-    #node_select { height: 3; dock: top; }
+    #node_select { height: 3; }
     #param_table { height: 1fr; }
-    #edit_row    { height: 3; dock: bottom; padding: 0 1; background: $surface; border-top: solid $accent; }
-    #edit_label  { width: 35; content-align: left middle; color: $text-muted; }
+    #edit_row {
+        height: 3;
+        padding: 0 1;
+        background: $surface;
+        border-top: solid $accent;
+    }
+    #edit_label  { width: 45; content-align: left middle; color: $text-muted; }
     #edit_input  { width: 1fr; }
-    #hint_bar    { height: 1; dock: bottom; }
+    #hint_bar    { height: 1; }
     """
 
     def __init__(self, store, bridge, **kwargs):
@@ -74,22 +110,24 @@ class ParamTunerPanel(Widget):
         self._history: List[tuple] = []
         self._ck: dict = {}
         self._suppress_select: bool = False
-        self._known_nodes: List[str] = []  # last list pushed to Select — skip set_options if unchanged
+        self._known_nodes: List[str] = []
+        self._readonly_cache: Dict[str, Set[str]] = {}
+        self._describing: Set[str] = set()
 
     def compose(self) -> ComposeResult:
         yield Select([], prompt="Select a node… (Tab to reach)", id="node_select")
         yield DataTable(id="param_table", zebra_stripes=True, cursor_type="row")
         with Horizontal(id="edit_row"):
             yield Label("No param selected", id="edit_label")
-            yield Input(placeholder="new value…  then Enter to apply", id="edit_input")
+            yield Input(placeholder="new value… then Enter to apply", id="edit_input")
         yield StatusBar(
-            "  Enter: Apply   Ctrl+Z: Undo   Ctrl+E: Export YAML   ↑↓: Navigate params",
-            id="hint_bar"
+            "  Enter: Apply   Ctrl+Z: Undo   Ctrl+E: Export YAML   up/down: Navigate",
+            id="hint_bar",
         )
 
     def on_mount(self) -> None:
         table = self.query_one("#param_table", DataTable)
-        labels = ["Parameter", "Value", "Type"]
+        labels = ["Parameter", "Value", "Type", "R/W"]
         keys = table.add_columns(*labels)
         self._ck = dict(zip(labels, keys))
         self.set_interval(2.0, self._refresh_node_list)
@@ -123,7 +161,7 @@ class ParamTunerPanel(Widget):
         cached = self._store.snapshot_param_nodes()
         all_nodes = sorted(set(live + cached))
         if all_nodes == self._known_nodes:
-            return  # nothing changed — don't touch the widget, preserves scroll position
+            return
         self._known_nodes = all_nodes
         sel = self.query_one("#node_select", Select)
         self._suppress_select = True
@@ -135,15 +173,42 @@ class ParamTunerPanel(Widget):
             self._suppress_select = False
 
     # -----------------------------------------------------------------------
+    # Read-only detection (background thread — non-blocking)
+    # -----------------------------------------------------------------------
+
+    def _ensure_readonly_cache(self, node: str) -> None:
+        if node in self._readonly_cache or node in self._describing:
+            return
+        self._describing.add(node)
+
+        def _worker():
+            readonly = _fetch_readonly_params(node)
+            self._readonly_cache[node] = readonly
+            self._describing.discard(node)
+            self.app.call_from_thread(self._refresh_params)
+
+        threading.Thread(target=_worker, daemon=True, name=f"ro_desc_{node}").start()
+
+    def _is_readonly(self, node: str, param_name: str) -> Optional[bool]:
+        """True=readonly, False=writable, None=still fetching."""
+        cache = self._readonly_cache.get(node)
+        if cache is None:
+            return None
+        if param_name in cache:
+            return True
+        return False
+
+    # -----------------------------------------------------------------------
     # Param table
     # -----------------------------------------------------------------------
 
     def _refresh_params(self) -> None:
         if not self._selected_node:
             return
+        self._ensure_readonly_cache(self._selected_node)
         params = self._store.snapshot_params(self._selected_node)
         table = self.query_one("#param_table", DataTable)
-        existing_values = {rk.value for rk in table.rows.keys()}
+        existing_keys = {rk.value for rk in table.rows.keys()}
         new_keys = {p.name for p in params}
 
         for rk in list(table.rows.keys()):
@@ -151,13 +216,26 @@ class ParamTunerPanel(Widget):
                 table.remove_row(rk)
 
         for p in sorted(params, key=lambda x: x.name):
-            val_text  = Text(str(p.value))
+            ro = self._is_readonly(self._selected_node, p.name)
+            if ro is True:
+                rw_text = Text("RO", style="bold red")
+            elif ro is False:
+                rw_text = Text("RW", style="bold green")
+            else:
+                rw_text = Text("...", style="dim")
+
+            val_text = Text(str(p.value))
             type_text = Text(p.type_name, style="dim")
-            if p.name in existing_values:
+
+            if p.name in existing_keys:
                 table.update_cell(p.name, self._ck["Value"], val_text)
+                table.update_cell(p.name, self._ck["R/W"], rw_text)
             else:
                 table.add_row(
-                    Text(p.name, style="cyan"), val_text, type_text,
+                    Text(p.name, style="cyan"),
+                    val_text,
+                    type_text,
+                    rw_text,
                     key=p.name,
                 )
 
@@ -174,6 +252,7 @@ class ParamTunerPanel(Widget):
         if node == self._selected_node:
             return
         self._selected_node = node
+        self.query_one("#param_table", DataTable).clear()
         if self._bridge:
             self._bridge.fetch_params(self._selected_node)
         self._set_status(f"Fetching params for {self._selected_node}…")
@@ -183,15 +262,29 @@ class ParamTunerPanel(Widget):
             return
         params = {p.name: p for p in self._store.snapshot_params(self._selected_node)}
         self._selected_param = params.get(event.row_key.value)
-        if self._selected_param:
+        if not self._selected_param:
+            return
+
+        ro = self._is_readonly(self._selected_node, self._selected_param.name)
+        inp = self.query_one("#edit_input", Input)
+
+        if ro is True:
+            self.query_one("#edit_label", Label).update(
+                f"[red]RO {self._selected_param.name}[/red] "
+                f"[dim]({self._selected_param.type_name}) read-only[/dim]"
+            )
+            inp.value = str(self._selected_param.value)
+            inp.disabled = True
+        else:
             self.query_one("#edit_label", Label).update(
                 f"[cyan]{self._selected_param.name}[/cyan] "
                 f"[dim]({self._selected_param.type_name})[/dim]"
             )
-            self.query_one("#edit_input", Input).value = str(self._selected_param.value)
+            inp.value = str(self._selected_param.value)
+            inp.disabled = False
 
     def on_button_pressed(self, event) -> None:
-        pass  # No buttons — keyboard only
+        pass
 
     # -----------------------------------------------------------------------
     # Operations
@@ -201,31 +294,58 @@ class ParamTunerPanel(Widget):
         if not self._selected_param or not self._selected_node or not self._bridge:
             self._set_status("Select a node and parameter first.")
             return
-        raw = self.query_one("#edit_input", Input).value.strip()
+
+        if self._is_readonly(self._selected_node, self._selected_param.name) is True:
+            self._set_status(f"  {self._selected_param.name} is read-only.")
+            return
+
+        inp = self.query_one("#edit_input", Input)
+        if inp.disabled:
+            return
+        raw = inp.value.strip()
         if not raw:
             return
+
         new_val = _coerce_value(raw, self._selected_param.type_name)
         old_val = self._selected_param.value
-        self._history.append((self._selected_node, self._selected_param.name, old_val, new_val))
+        self._history.append(
+            (self._selected_node, self._selected_param.name, old_val, new_val)
+        )
         self._set_status(f"Setting {self._selected_param.name} = {new_val}…")
 
+        param_name = self._selected_param.name
+
         def on_done(success: bool, error: str) -> None:
-            msg = (f"✓ {self._selected_param.name} = {new_val}" if success
-                   else f"✗ Failed: {error}")
+            if success:
+                msg = f"  {param_name} = {new_val}"
+            else:
+                msg = f"  Failed: {error}"
+                # If runtime reveals it's read-only, cache that
+                if "read-only" in error.lower() or "cannot be set" in error.lower():
+                    node = self._selected_node
+                    if node not in self._readonly_cache:
+                        self._readonly_cache[node] = set()
+                    self._readonly_cache[node].add(param_name)
+                    self.app.call_from_thread(self._refresh_params)
             self.app.call_from_thread(self._set_status, msg)
 
-        self._bridge.set_param(self._selected_node, self._selected_param.name,
-                               new_val, on_done=on_done)
+        self._bridge.set_param(
+            self._selected_node, self._selected_param.name, new_val, on_done=on_done
+        )
 
     def _undo_last(self) -> None:
         if not self._history or not self._bridge:
             self._set_status("Nothing to undo.")
             return
         node, param, old_val, _ = self._history.pop()
-        self._set_status(f"Undoing {param} → {old_val}…")
+        self._set_status(f"Undoing {param} -> {old_val}…")
 
         def on_done(success: bool, error: str) -> None:
-            msg = f"✓ Undone: {param} = {old_val}" if success else f"✗ Undo failed: {error}"
+            msg = (
+                f"  Undone: {param} = {old_val}"
+                if success
+                else f"  Undo failed: {error}"
+            )
             self.app.call_from_thread(self._set_status, msg)
 
         self._bridge.set_param(node, param, old_val, on_done=on_done)
@@ -238,12 +358,12 @@ class ParamTunerPanel(Widget):
         if not params:
             self._set_status("No params to export.")
             return
-        node_bare = self._selected_node.lstrip("/")
+        node_bare = self._selected_node.lstrip("/").replace("/", "_")
         data = {node_bare: {"ros__parameters": {p.name: p.value for p in params}}}
         ts = time.strftime("%Y%m%d_%H%M%S")
         filename = f"params_{node_bare}_{ts}.yaml"
         Path(filename).write_text(yaml.dump(data, default_flow_style=False))
-        self._set_status(f"✓ Exported → {filename}")
+        self._set_status(f"  Exported -> {filename}")
 
     def _set_status(self, msg: str) -> None:
         self.query_one("#hint_bar", StatusBar).update(
