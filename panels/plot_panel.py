@@ -632,7 +632,8 @@ class PlotCanvas(Static):
         super().__init__("", **kwargs)
         self._store = store
         self._window = 30
-        self._mode = "Topics"  # "Topics" | "CPU" | "Memory"
+        self._mode = "Topics"
+        self._last_point_count = 0
 
     def set_window(self, w: int) -> None:
         self._window = w
@@ -646,14 +647,20 @@ class PlotCanvas(Static):
         if self._mode == "Topics":
             series = self._store.snapshot_plot(window_seconds=self._window)
             markers = self._store.snapshot_param_changes()
-            self.update(render_plot_text(series, markers, self._window, cw, ch))
         else:
             mode_key = "cpu" if self._mode == "CPU" else "mem_mb"
             series = self._store.snapshot_node_plot(
                 mode_key, window_seconds=self._window
             )
             markers = []
-            self.update(render_plot_text(series, markers, self._window, cw, ch))
+
+        # Skip redraw if no new points arrived
+        total = sum(len(v) for v in series.values())
+        if total == self._last_point_count and total > 0:
+            return
+        self._last_point_count = total
+
+        self.update(render_plot_text(series, markers, self._window, cw, ch))
 
     def get_pinned_with_colors(self) -> List[Tuple[str, str]]:
         if self._mode == "Topics":
@@ -757,7 +764,7 @@ class PlotPanel(Widget):
         yield VarianceTable(id="variance_table")
 
     def on_mount(self) -> None:
-        self.set_interval(1.0, self._refresh)
+        self.set_interval(0.1, self._refresh)
 
     # -----------------------------------------------------------------------
     # Events
