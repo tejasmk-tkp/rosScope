@@ -1,7 +1,7 @@
 """
 panels/param_tuner.py — Parameter Tuner panel.
 Full keyboard navigation. Enter=Apply, Ctrl+Z=Undo, Ctrl+E=Export YAML.
-Read-only params are shown with a lock indicator and blocked from editing.
+Read-only status fetched lazily per-param when row is highlighted.
 """
 
 import subprocess
@@ -13,8 +13,8 @@ from typing import Any, Dict, List, Optional, Set
 
 from textual.app import ComposeResult
 from textual.widget import Widget
-from textual.widgets import DataTable, Select, Input, Label, Static, Button
-from textual.containers import Vertical, Horizontal
+from textual.widgets import DataTable, Select, Input, Label, Static
+from textual.containers import Horizontal
 from textual.binding import Binding
 from rich.text import Text
 
@@ -34,32 +34,27 @@ def _coerce_value(raw: str, type_name: str) -> Any:
         return raw
 
 
-def _fetch_readonly_params(node: str) -> Set[str]:
+def _describe_one_param(node: str, param: str) -> Optional[bool]:
     """
-    Run `ros2 param describe <node> --all` and return set of read-only param names.
-    Falls back to empty set on any error.
+    Returns True if read-only, False if writable, None on error.
+    Uses `ros2 param describe <node> <param>`.
     """
-    readonly: Set[str] = set()
     try:
         result = subprocess.run(
-            ["ros2", "param", "describe", node, "--all"],
+            ["ros2", "param", "describe", node, param],
             capture_output=True,
             text=True,
-            timeout=12.0,
+            timeout=6.0,
         )
         if result.returncode != 0:
-            return readonly
-        current_param = None
+            return None
         for line in result.stdout.splitlines():
             stripped = line.strip()
-            if stripped.startswith("Parameter name:"):
-                current_param = stripped.split(":", 1)[1].strip()
-            elif stripped.startswith("Read only:") and current_param:
-                if "true" in stripped.lower():
-                    readonly.add(current_param)
+            if stripped.startswith("Read only:"):
+                return "true" in stripped.lower()
     except Exception:
         pass
-    return readonly
+    return None
 
 
 class StatusBar(Static):
@@ -111,7 +106,9 @@ class ParamTunerPanel(Widget):
         self._ck: dict = {}
         self._suppress_select: bool = False
         self._known_nodes: List[str] = []
-        self._readonly_cache: Dict[str, Set[str]] = {}
+        # {node: {param_name: True/False}}  — True = read-only
+        self._readonly_cache: Dict[str, Dict[str, bool]] = {}
+        # params currently being described
         self._describing: Set[str] = set()
 
     def compose(self) -> ComposeResult:
@@ -173,30 +170,70 @@ class ParamTunerPanel(Widget):
             self._suppress_select = False
 
     # -----------------------------------------------------------------------
-    # Read-only detection (background thread — non-blocking)
+    # Lazy per-param read-only check
     # -----------------------------------------------------------------------
 
-    def _ensure_readonly_cache(self, node: str) -> None:
-        if node in self._readonly_cache or node in self._describing:
+    def _get_readonly(self, node: str, param: str) -> Optional[bool]:
+        """Return cached value or None if not yet known."""
+        return self._readonly_cache.get(node, {}).get(param)
+
+    def _fetch_readonly_async(self, node: str, param: str) -> None:
+        """Kick off background describe for a single param if not cached."""
+        key = f"{node}::{param}"
+        if key in self._describing:
             return
-        self._describing.add(node)
+        if param in self._readonly_cache.get(node, {}):
+            return
+        self._describing.add(key)
 
         def _worker():
-            readonly = _fetch_readonly_params(node)
-            self._readonly_cache[node] = readonly
-            self._describing.discard(node)
-            self.app.call_from_thread(self._refresh_params)
+            ro = _describe_one_param(node, param)
+            if ro is not None:
+                if node not in self._readonly_cache:
+                    self._readonly_cache[node] = {}
+                self._readonly_cache[node][param] = ro
+            self._describing.discard(key)
+            # Refresh table cell and edit row
+            self.app.call_from_thread(self._update_rw_cell, node, param, ro)
 
-        threading.Thread(target=_worker, daemon=True, name=f"ro_desc_{node}").start()
+        threading.Thread(target=_worker, daemon=True, name=f"ro_{param[:20]}").start()
 
-    def _is_readonly(self, node: str, param_name: str) -> Optional[bool]:
-        """True=readonly, False=writable, None=still fetching."""
-        cache = self._readonly_cache.get(node)
-        if cache is None:
-            return None
-        if param_name in cache:
-            return True
-        return False
+    def _update_rw_cell(self, node: str, param: str, ro: Optional[bool]) -> None:
+        """Called from thread after describe completes — update cell and edit row."""
+        if ro is None:
+            return
+        try:
+            table = self.query_one("#param_table", DataTable)
+            rw_text = (
+                Text("RO", style="bold red") if ro else Text("RW", style="bold green")
+            )
+            table.update_cell(param, self._ck["R/W"], rw_text)
+        except Exception:
+            pass
+        # Also update edit row if this is the currently selected param
+        if (
+            self._selected_param
+            and self._selected_param.name == param
+            and self._selected_node == node
+        ):
+            self._update_edit_row(ro)
+
+    def _update_edit_row(self, ro: bool) -> None:
+        if not self._selected_param:
+            return
+        inp = self.query_one("#edit_input", Input)
+        if ro:
+            self.query_one("#edit_label", Label).update(
+                f"[red]RO  {self._selected_param.name}[/red] "
+                f"[dim]({self._selected_param.type_name})  read-only[/dim]"
+            )
+            inp.disabled = True
+        else:
+            self.query_one("#edit_label", Label).update(
+                f"[cyan]{self._selected_param.name}[/cyan] "
+                f"[dim]({self._selected_param.type_name})[/dim]"
+            )
+            inp.disabled = False
 
     # -----------------------------------------------------------------------
     # Param table
@@ -205,7 +242,6 @@ class ParamTunerPanel(Widget):
     def _refresh_params(self) -> None:
         if not self._selected_node:
             return
-        self._ensure_readonly_cache(self._selected_node)
         params = self._store.snapshot_params(self._selected_node)
         table = self.query_one("#param_table", DataTable)
         existing_keys = {rk.value for rk in table.rows.keys()}
@@ -216,7 +252,7 @@ class ParamTunerPanel(Widget):
                 table.remove_row(rk)
 
         for p in sorted(params, key=lambda x: x.name):
-            ro = self._is_readonly(self._selected_node, p.name)
+            ro = self._get_readonly(self._selected_node, p.name)
             if ro is True:
                 rw_text = Text("RO", style="bold red")
             elif ro is False:
@@ -265,26 +301,20 @@ class ParamTunerPanel(Widget):
         if not self._selected_param:
             return
 
-        ro = self._is_readonly(self._selected_node, self._selected_param.name)
         inp = self.query_one("#edit_input", Input)
+        inp.value = str(self._selected_param.value)
 
-        if ro is True:
-            self.query_one("#edit_label", Label).update(
-                f"[red]RO {self._selected_param.name}[/red] "
-                f"[dim]({self._selected_param.type_name}) read-only[/dim]"
-            )
-            inp.value = str(self._selected_param.value)
-            inp.disabled = True
-        else:
+        ro = self._get_readonly(self._selected_node, self._selected_param.name)
+        if ro is None:
+            # Not cached yet — show as editable optimistically, kick off fetch
             self.query_one("#edit_label", Label).update(
                 f"[cyan]{self._selected_param.name}[/cyan] "
-                f"[dim]({self._selected_param.type_name})[/dim]"
+                f"[dim]({self._selected_param.type_name})  checking…[/dim]"
             )
-            inp.value = str(self._selected_param.value)
             inp.disabled = False
-
-    def on_button_pressed(self, event) -> None:
-        pass
+            self._fetch_readonly_async(self._selected_node, self._selected_param.name)
+        else:
+            self._update_edit_row(ro)
 
     # -----------------------------------------------------------------------
     # Operations
@@ -295,7 +325,8 @@ class ParamTunerPanel(Widget):
             self._set_status("Select a node and parameter first.")
             return
 
-        if self._is_readonly(self._selected_node, self._selected_param.name) is True:
+        ro = self._get_readonly(self._selected_node, self._selected_param.name)
+        if ro is True:
             self._set_status(f"  {self._selected_param.name} is read-only.")
             return
 
@@ -320,13 +351,15 @@ class ParamTunerPanel(Widget):
                 msg = f"  {param_name} = {new_val}"
             else:
                 msg = f"  Failed: {error}"
-                # If runtime reveals it's read-only, cache that
+                # Runtime revealed it's read-only — cache and update UI
                 if "read-only" in error.lower() or "cannot be set" in error.lower():
                     node = self._selected_node
                     if node not in self._readonly_cache:
-                        self._readonly_cache[node] = set()
-                    self._readonly_cache[node].add(param_name)
-                    self.app.call_from_thread(self._refresh_params)
+                        self._readonly_cache[node] = {}
+                    self._readonly_cache[node][param_name] = True
+                    self.app.call_from_thread(
+                        self._update_rw_cell, node, param_name, True
+                    )
             self.app.call_from_thread(self._set_status, msg)
 
         self._bridge.set_param(
