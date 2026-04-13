@@ -239,7 +239,9 @@ class RosBridge:
             self._run_disconnected_loop()
             return
 
-        # Subscribe to /rosout — publishers use TRANSIENT_LOCAL so we must match
+        # Subscribe to /rosout — publishers use TRANSIENT_LOCAL so we must match.
+        # KEEP_ALL on the subscriber side ensures we don't cap the incoming history
+        # buffer ourselves — we let the deque in DataStore control retention.
         try:
             from rclpy.qos import (
                 QoSProfile,
@@ -252,7 +254,7 @@ class RosBridge:
                 depth=1000,
                 reliability=ReliabilityPolicy.RELIABLE,
                 durability=DurabilityPolicy.TRANSIENT_LOCAL,
-                history=HistoryPolicy.KEEP_LAST,
+                history=HistoryPolicy.KEEP_ALL,
             )
             self._node.create_subscription(
                 RosoutMsg,

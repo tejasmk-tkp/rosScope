@@ -203,7 +203,7 @@ class RosoutPanel(Widget):
             pass
 
     # -----------------------------------------------------------------------
-    # Refresh — only re-render if count changed
+    # Refresh — re-render when total store count changes, or any filter active
     # -----------------------------------------------------------------------
 
     def _refresh(self) -> None:
@@ -211,10 +211,14 @@ class RosoutPanel(Widget):
             node_filter=self._node_filter or None,
             level_filter=self._level if self._level != "ALL" else None,
             keyword_filter=self._kw_filter or None,
-            max_lines=500,
+            max_lines=2000,
         )
-        if len(lines) != self._last_count or self._node_filter or self._kw_filter:
-            self._last_count = len(lines)
+        # Track total messages in the store, not the filtered count.
+        # Comparing filtered count meant the view froze as soon as the filtered
+        # result stabilised — new messages arriving were never rendered.
+        total_count = self._store.total_log_count()
+        if total_count != self._last_count or self._node_filter or self._kw_filter:
+            self._last_count = total_count
             self._render_lines(lines)
 
         self._update_header(len(lines))
@@ -233,7 +237,7 @@ class RosoutPanel(Widget):
         self.query_one("#log_view", LogView).set_content(result)
 
     def _update_header(self, shown: int, exported: Optional[str] = None) -> None:
-        all_lines = self._store.snapshot_logs(max_lines=10000)
+        all_lines = self._store.snapshot_logs(max_lines=2000)
         counts: dict = {}
         for _, level, _ in all_lines:
             counts[level] = counts.get(level, 0) + 1

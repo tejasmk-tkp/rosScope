@@ -17,10 +17,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .proc_utils import NodeResources, SystemResources, MemTrend
 
-
 # ---------------------------------------------------------------------------
 # Snapshot types (immutable views handed to the TUI)
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class NodeSnapshot:
@@ -29,7 +29,7 @@ class NodeSnapshot:
     cpu_percent: float
     memory_mb: float
     mem_trend: MemTrend
-    cpu_sparkline: Tuple[float, ...]   # last N samples for rendering
+    cpu_sparkline: Tuple[float, ...]  # last N samples for rendering
     mem_sparkline: Tuple[float, ...]
 
 
@@ -42,8 +42,8 @@ class TopicSnapshot:
     frequency_hz: float
     qos_reliability: str
     qos_durability: str
-    qos_mismatch: bool          # True if pub/sub QoS are incompatible
-    last_msg_repr: str          # str of last message (truncated)
+    qos_mismatch: bool  # True if pub/sub QoS are incompatible
+    last_msg_repr: str  # str of last message (truncated)
 
 
 @dataclass(frozen=True)
@@ -57,12 +57,12 @@ class ParamSnapshot:
     node: str
     name: str
     value: Any
-    type_name: str              # 'bool', 'int', 'double', 'string', 'list'
+    type_name: str  # 'bool', 'int', 'double', 'string', 'list'
 
 
 @dataclass(frozen=True)
 class PlotPoint:
-    timestamp: float            # monotonic
+    timestamp: float  # monotonic
     value: float
 
 
@@ -79,10 +79,10 @@ class ParamChangeMarker:
 class TFTransform:
     parent: str
     child: str
-    stamp_age_s: float      # age = ros_now - header.stamp (s); -1 if unknown/static
-    last_received: float    # time.monotonic() of last received msg
-    is_static: bool         # from /tf_static
-    publisher_node: str     # best-effort, may be empty
+    stamp_age_s: float  # age = ros_now - header.stamp (s); -1 if unknown/static
+    last_received: float  # time.monotonic() of last received msg
+    is_static: bool  # from /tf_static
+    publisher_node: str  # best-effort, may be empty
 
 
 @dataclass(frozen=True)
@@ -99,6 +99,7 @@ class SystemSnapshot:
 # Plot series state (mutable, lock-protected inside DataStore)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _PlotSeries:
     topic: str
@@ -110,6 +111,7 @@ class _PlotSeries:
 # DataStore
 # ---------------------------------------------------------------------------
 
+
 class DataStore:
     """
     Central shared state. All mutation goes through update_* methods.
@@ -118,7 +120,9 @@ class DataStore:
     """
 
     def __init__(self, plot_window_seconds: int = 30):
-        self._lock = threading.RLock()   # Reentrant so update methods can call each other
+        self._lock = (
+            threading.RLock()
+        )  # Reentrant so update methods can call each other
         self._plot_window = plot_window_seconds
 
         # Node resources (from proc_utils.ResourceMonitor)
@@ -152,8 +156,8 @@ class DataStore:
         self._tf_transforms: Dict[Tuple[str, str], TFTransform] = {}
         self._tf_static: Dict[Tuple[str, str], TFTransform] = {}
 
-        # Log lines from /rosout
-        self._log_lines: deque = deque(maxlen=500)
+        # Log lines from /rosout — 2000 entries before oldest messages are evicted
+        self._log_lines: deque = deque(maxlen=2000)
 
         # Connection state
         self._ros_connected: bool = False
@@ -163,9 +167,9 @@ class DataStore:
     # Write API (called from ROS bridge thread)
     # -----------------------------------------------------------------------
 
-    def update_node_resources(self,
-                               resources: Dict[str, NodeResources],
-                               system: SystemResources) -> None:
+    def update_node_resources(
+        self, resources: Dict[str, NodeResources], system: SystemResources
+    ) -> None:
         with self._lock:
             self._node_resources = dict(resources)
             self._system_resources = system
@@ -189,9 +193,11 @@ class DataStore:
         with self._lock:
             self._services = dict(services)
 
-    def append_node_resource_point(self, node: str, timestamp: float,
-                                    cpu: float, mem_mb: float) -> None:
+    def append_node_resource_point(
+        self, node: str, timestamp: float, cpu: float, mem_mb: float
+    ) -> None:
         from collections import deque as _deque
+
         with self._lock:
             if node not in self._node_plot_history:
                 self._node_plot_history[node] = _deque(maxlen=600)
@@ -272,15 +278,17 @@ class DataStore:
         with self._lock:
             snapshots = []
             for name, res in self._node_resources.items():
-                snapshots.append(NodeSnapshot(
-                    name=name,
-                    pid=res.pid,
-                    cpu_percent=res.cpu_percent,
-                    memory_mb=res.memory_mb,
-                    mem_trend=res.mem_trend,
-                    cpu_sparkline=tuple(res.cpu_history),
-                    mem_sparkline=tuple(res.mem_history),
-                ))
+                snapshots.append(
+                    NodeSnapshot(
+                        name=name,
+                        pid=res.pid,
+                        cpu_percent=res.cpu_percent,
+                        memory_mb=res.memory_mb,
+                        mem_trend=res.mem_trend,
+                        cpu_sparkline=tuple(res.cpu_history),
+                        mem_sparkline=tuple(res.mem_history),
+                    )
+                )
             return sorted(snapshots, key=lambda n: n.name)
 
     def snapshot_topics(self) -> List[TopicSnapshot]:
@@ -294,7 +302,11 @@ class DataStore:
     def snapshot_node_plot(self, mode: str, window_seconds: float = 30.0):
         cutoff = time.monotonic() - window_seconds
         with self._lock:
-            pinned = self._pinned_nodes if self._pinned_nodes else set(self._node_plot_history.keys())
+            pinned = (
+                self._pinned_nodes
+                if self._pinned_nodes
+                else set(self._node_plot_history.keys())
+            )
             result = {}
             for node, history in self._node_plot_history.items():
                 if node not in pinned:
@@ -316,7 +328,9 @@ class DataStore:
         with self._lock:
             return sorted(self._params.keys())
 
-    def snapshot_plot(self, window_seconds: Optional[float] = None) -> Dict[str, List[PlotPoint]]:
+    def snapshot_plot(
+        self, window_seconds: Optional[float] = None
+    ) -> Dict[str, List[PlotPoint]]:
         """
         Returns plot data trimmed to the current time window.
         Keys are topic names, values are time-ordered lists of PlotPoints.
@@ -352,16 +366,23 @@ class DataStore:
         with self._lock:
             return list(self._param_change_history)
 
-    def update_tf(self, parent: str, child: str,
-                  stamp_age_s: float = -1.0,
-                  last_received: Optional[float] = None,
-                  is_static: bool = False,
-                  publisher_node: str = "") -> None:
+    def update_tf(
+        self,
+        parent: str,
+        child: str,
+        stamp_age_s: float = -1.0,
+        last_received: Optional[float] = None,
+        is_static: bool = False,
+        publisher_node: str = "",
+    ) -> None:
         key = (parent, child)
         tf = TFTransform(
-            parent=parent, child=child,
+            parent=parent,
+            child=child,
             stamp_age_s=stamp_age_s,
-            last_received=last_received if last_received is not None else time.monotonic(),
+            last_received=last_received
+            if last_received is not None
+            else time.monotonic(),
             is_static=is_static,
             publisher_node=publisher_node,
         )
@@ -376,11 +397,18 @@ class DataStore:
         with self._lock:
             return list(self._tf_transforms.values()), list(self._tf_static.values())
 
-    def snapshot_logs(self,
-                      node_filter: Optional[str] = None,
-                      level_filter: Optional[str] = None,
-                      keyword_filter: Optional[str] = None,
-                      max_lines: int = 500) -> List[Tuple[float, str, str]]:
+    def total_log_count(self) -> int:
+        """Return total number of stored log lines (no filtering, no copying)."""
+        with self._lock:
+            return len(self._log_lines)
+
+    def snapshot_logs(
+        self,
+        node_filter: Optional[str] = None,
+        level_filter: Optional[str] = None,
+        keyword_filter: Optional[str] = None,
+        max_lines: int = 500,
+    ) -> List[Tuple[float, str, str]]:
         """Returns list of (timestamp, level, line)."""
         with self._lock:
             lines = list(self._log_lines)
@@ -418,5 +446,4 @@ class DataStore:
             if field is not None:
                 return f"{topic}::{field}" in self._plot_series
             prefix = f"{topic}::"
-            return any(k == topic or k.startswith(prefix)
-                       for k in self._plot_series)
+            return any(k == topic or k.startswith(prefix) for k in self._plot_series)
