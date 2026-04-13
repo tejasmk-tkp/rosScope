@@ -77,6 +77,9 @@ def _draw_vline(canvas, xn, cw, ch):
         _plot_dot(canvas, dx, dy, cw, ch)
 
 
+AXIS_W = 8  # must match the label width used in the render loop
+
+
 def render_plot_text(series, markers, window, cw, ch) -> Text:
     if cw < 4 or ch < 4:
         return Text("(too small)")
@@ -92,26 +95,28 @@ def render_plot_text(series, markers, window, cw, ch) -> Text:
         ymin -= 1.0
         ymax += 1.0
 
+    # Plot area excludes the axis label columns on the left
+    pcw = max(cw - AXIS_W, 4)
+
     topic_layers = []
     for idx, (topic, points) in enumerate(series.items()):
         color = _COLORS[idx % len(_COLORS)]
-        layer = _make_canvas(cw, ch)
+        layer = _make_canvas(pcw, ch)
         pts = [p for p in points if p.timestamp >= t0]
         for i in range(len(pts) - 1):
             xn0 = (pts[i].timestamp - t0) / window
             xn1 = (pts[i + 1].timestamp - t0) / window
             _draw_line_on_canvas(
-                layer, xn0, pts[i].value, xn1, pts[i + 1].value, cw, ch, ymin, ymax
+                layer, xn0, pts[i].value, xn1, pts[i + 1].value, pcw, ch, ymin, ymax
             )
         topic_layers.append((layer, color))
 
-    mcanvas = _make_canvas(cw, ch)
+    mcanvas = _make_canvas(pcw, ch)
     for m in markers:
         if t0 <= m.timestamp <= now:
-            _draw_vline(mcanvas, (m.timestamp - t0) / window, cw, ch)
+            _draw_vline(mcanvas, (m.timestamp - t0) / window, pcw, ch)
 
     tick_rows = {0, ch // 4, ch // 2, 3 * ch // 4, ch - 1}
-    AXIS_W = 8
 
     result = Text()
     for cy in range(ch):
@@ -122,7 +127,7 @@ def render_plot_text(series, markers, window, cw, ch) -> Text:
             label = " " * AXIS_W
         result.append(label, style=Style(color="bright_black"))
 
-        for cx in range(max(cw - AXIS_W, 1)):
+        for cx in range(pcw):
             if mcanvas[cy][cx]:
                 result.append(
                     chr(_BRAILLE_BASE | mcanvas[cy][cx]), style=Style(color="white")
@@ -209,15 +214,16 @@ class TopicSearchBar(Widget):
         self._store = store
         self._bridge = bridge
         self._all_topics: List[str] = []
-        self._pending_topic: Optional[str] = None   # waiting for field selection
+        self._pending_topic: Optional[str] = None  # waiting for field selection
         self._dropdown: Optional[TopicDropdown] = None
 
     def compose(self) -> ComposeResult:
         yield Input(placeholder="search & select topic to pin…", id="search_input")
 
     def on_mount(self) -> None:
-        self._dropdown = TopicDropdown(on_chosen=self._on_option_chosen,
-                                       id="topic_dropdown")
+        self._dropdown = TopicDropdown(
+            on_chosen=self._on_option_chosen, id="topic_dropdown"
+        )
         self.app.mount(self._dropdown)
         self.set_interval(2.0, self._refresh_topic_list)
 
@@ -284,7 +290,8 @@ class TopicSearchBar(Widget):
     def _show_topic_dropdown(self, query: str) -> None:
         matches = (
             [t for t in self._all_topics if query.lower() in t.lower()]
-            if query else self._all_topics
+            if query
+            else self._all_topics
         )
         if matches:
             self._show_options(matches)
@@ -296,7 +303,9 @@ class TopicSearchBar(Widget):
             self._dropdown.display = False
         self._pending_topic = None
         try:
-            self.query_one("#search_input", Input).placeholder = "search & select topic to pin…"
+            self.query_one(
+                "#search_input", Input
+            ).placeholder = "search & select topic to pin…"
         except NoMatches:
             pass
 
@@ -338,6 +347,7 @@ class TopicSearchBar(Widget):
 # Node search bar — single-stage picker for CPU/Memory mode
 # ---------------------------------------------------------------------------
 
+
 class NodeSearchBar(Widget):
     """Single-stage node picker for CPU/Memory plot mode.
     Emits NodeSearchBar.Selected(node_name).
@@ -370,8 +380,9 @@ class NodeSearchBar(Widget):
         yield Input(placeholder="search & select node to pin…", id="node_search_input")
 
     def on_mount(self) -> None:
-        self._dropdown = TopicDropdown(on_chosen=self._on_node_chosen,
-                                       id="node_dropdown")
+        self._dropdown = TopicDropdown(
+            on_chosen=self._on_node_chosen, id="node_dropdown"
+        )
         self.app.mount(self._dropdown)
         self.set_interval(2.0, self._refresh_node_list)
 
@@ -401,7 +412,8 @@ class NodeSearchBar(Widget):
     def _show_dropdown(self, query: str) -> None:
         matches = (
             [n for n in self._all_nodes if query.lower() in n.lower()]
-            if query else self._all_nodes
+            if query
+            else self._all_nodes
         )
         if not matches or not self._dropdown:
             if self._dropdown:
@@ -466,7 +478,7 @@ class TopicChip(Widget):
     def __init__(self, topic: str, color: str, **kwargs):
         super().__init__(**kwargs)
         self.can_focus = True
-        self._topic = topic   # stored as "topic::field"
+        self._topic = topic  # stored as "topic::field"
         self._color = color
 
     def render(self) -> Text:
@@ -475,12 +487,14 @@ class TopicChip(Widget):
         # _topic is "topic::field" — show as "short_topic.field"
         if "::" in self._topic:
             topic_part, field_part = self._topic.split("::", 1)
-            short = (topic_part.split("/")[-1] or topic_part)
+            short = topic_part.split("/")[-1] or topic_part
             label = f"{short}.{field_part}"
         else:
             label = self._topic.split("/")[-1] or self._topic
         t.append(label, style=Style(color=self._color, bold=self.has_focus))
-        t.append(" [×]", style=Style(color="bright_red" if self.has_focus else "grey42"))
+        t.append(
+            " [×]", style=Style(color="bright_red" if self.has_focus else "grey42")
+        )
         return t
 
     def on_focus(self) -> None:
@@ -554,20 +568,26 @@ class PinnedTopicsBar(Widget):
             pass
 
         if not items:
-            self.mount(Static(
-                "[dim]No topics pinned — Ctrl+U to search[/dim]",
-                id="no_topics_hint",
-            ))
+            self.mount(
+                Static(
+                    "[dim]No topics pinned — Ctrl+U to search[/dim]",
+                    id="no_topics_hint",
+                )
+            )
             return
 
         existing = {c._topic for c in self.query(TopicChip)}
         for key, color in items:
             if key not in existing:
-                chip_id = "chip_" + key.replace("/", "__").replace(".", "_").replace(":", "_")
+                chip_id = "chip_" + key.replace("/", "__").replace(".", "_").replace(
+                    ":", "_"
+                )
                 self.mount(TopicChip(key, color, id=chip_id))
 
         if focused_topic and focused_topic in new_set:
-            chip_id = "#chip_" + focused_topic.replace("/", "__").replace(".", "_").replace(":", "_")
+            chip_id = "#chip_" + focused_topic.replace("/", "__").replace(
+                ".", "_"
+            ).replace(":", "_")
             try:
                 self.query_one(chip_id, TopicChip).focus()
             except NoMatches:
@@ -612,7 +632,7 @@ class PlotCanvas(Static):
         super().__init__("", **kwargs)
         self._store = store
         self._window = 30
-        self._mode = "Topics"   # "Topics" | "CPU" | "Memory"
+        self._mode = "Topics"  # "Topics" | "CPU" | "Memory"
 
     def set_window(self, w: int) -> None:
         self._window = w
@@ -629,8 +649,9 @@ class PlotCanvas(Static):
             self.update(render_plot_text(series, markers, self._window, cw, ch))
         else:
             mode_key = "cpu" if self._mode == "CPU" else "mem_mb"
-            series = self._store.snapshot_node_plot(mode_key,
-                                                     window_seconds=self._window)
+            series = self._store.snapshot_node_plot(
+                mode_key, window_seconds=self._window
+            )
             markers = []
             self.update(render_plot_text(series, markers, self._window, cw, ch))
 
@@ -639,8 +660,9 @@ class PlotCanvas(Static):
             series = self._store.snapshot_plot(window_seconds=self._window)
         else:
             mode_key = "cpu" if self._mode == "CPU" else "mem_mb"
-            series = self._store.snapshot_node_plot(mode_key,
-                                                     window_seconds=self._window)
+            series = self._store.snapshot_node_plot(
+                mode_key, window_seconds=self._window
+            )
         return [(t, _COLORS[i % len(_COLORS)]) for i, t in enumerate(series.keys())]
 
 
@@ -747,7 +769,7 @@ class PlotPanel(Widget):
             self._mode = mode
             canvas = self.query_one("#plot_canvas", PlotCanvas)
             canvas.set_mode(mode)
-            is_topics = (mode == "Topics")
+            is_topics = mode == "Topics"
             self.query_one("#topic_search", TopicSearchBar).display = is_topics
             self.query_one("#node_search", NodeSearchBar).display = not is_topics
 
@@ -769,7 +791,8 @@ class PlotPanel(Widget):
         self.query_one("#node_search", NodeSearchBar).clear_input()
 
     def on_pinned_topics_bar_unpin_requested(
-            self, event: PinnedTopicsBar.UnpinRequested) -> None:
+        self, event: PinnedTopicsBar.UnpinRequested
+    ) -> None:
         key = event.topic
         if self._mode in ("CPU", "Memory"):
             # In node modes the chip label is the node name directly
@@ -818,7 +841,9 @@ class PlotPanel(Widget):
         if self._mode in ("CPU", "Memory"):
             # Chips show pinned nodes
             pinned = self._store.snapshot_pinned_nodes()
-            chips = [(n, _COLORS[i % len(_COLORS)]) for i, n in enumerate(sorted(pinned))]
+            chips = [
+                (n, _COLORS[i % len(_COLORS)]) for i, n in enumerate(sorted(pinned))
+            ]
         else:
             chips = canvas.get_pinned_with_colors()
         self.query_one("#pinned_bar", PinnedTopicsBar).set_chips(chips)
