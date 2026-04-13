@@ -180,13 +180,29 @@ class SearchBar(Widget):
     def on_mount(self) -> None:
         from textual.widgets import OptionList as OL
 
-        # Mount on app so dropdown floats freely above all widgets.
-        # Dispatch back to us via _search_bar_owner set on the _dd object.
         self._dd = OL(id=f"sb_dd_{id(self)}")
         self._dd.display = False
         self._dd.styles.max_height = 10
+        # Back-reference so InteractorPanel can dispatch selection back to us
         self._dd._search_bar_owner = self
+        # Also intercept Enter key while the OptionList has focus
+        self._dd.on_key = self._dd_on_key
         self.app.mount(self._dd)
+
+    def _dd_on_key(self, event) -> None:
+        """Handle keys while the dropdown OptionList is focused."""
+        if event.key == "enter":
+            highlighted = self._dd.highlighted
+            if highlighted is not None and highlighted < len(self._matches):
+                self._choose(self._matches[highlighted])
+                event.stop()
+        elif event.key == "escape":
+            self._hide()
+            try:
+                self.query_one("#sb_input", Input).focus()
+            except Exception:
+                pass
+            event.stop()
 
     def on_unmount(self) -> None:
         if self._dd is not None:
@@ -264,6 +280,14 @@ class SearchBar(Widget):
         elif event.key == "down":
             self._dd.focus()
             event.stop()
+        elif event.key == "enter":
+            # Enter while input still has focus — pick first match
+            if self._matches:
+                highlighted = self._dd.highlighted
+                pick = (self._matches[highlighted]
+                        if highlighted is not None else self._matches[0])
+                self._choose(pick)
+                event.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -687,11 +711,9 @@ class InteractorPanel(Widget):
             pass
 
     def on_option_list_option_selected(self, event) -> None:
-        # The SearchBar mounts its _dd OptionList on the app, so
-        # OptionList.OptionSelected bubbles to the app, not through SearchBar.
-        # We stored _search_bar_owner on the _dd so we can dispatch back here.
-        owner: Optional[SearchBar] = getattr(event.option_list,
-                                             "_search_bar_owner", None)
+        # _dd is mounted on app so events bubble here not through SearchBar.
+        # _search_bar_owner points back to the owning SearchBar instance.
+        owner = getattr(event.option_list, "_search_bar_owner", None)
         if owner is not None:
             owner._choose(str(event.option.prompt))
             event.stop()
