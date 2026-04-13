@@ -32,10 +32,10 @@ from rich.text import Text
 
 from core.data_store import DataStore
 
-
 # ---------------------------------------------------------------------------
 # Field widget — renders a single typed input for one message field
 # ---------------------------------------------------------------------------
+
 
 class FieldInput(Horizontal):
     """One row: label + appropriate input widget for a message field."""
@@ -57,9 +57,9 @@ class FieldInput(Horizontal):
 
     def __init__(self, field: dict, **kwargs):
         super().__init__(**kwargs)
-        self._field  = field   # {path, type, default}
-        self._ftype  = field["type"]
-        self._path   = field["path"]
+        self._field = field  # {path, type, default}
+        self._ftype = field["type"]
+        self._path = field["path"]
         self._default = field["default"]
 
     def compose(self) -> ComposeResult:
@@ -71,8 +71,7 @@ class FieldInput(Horizontal):
         yield Label(label_text, id=f"lbl_{self._safe_id()}")
 
         if self._ftype == "bool":
-            yield Switch(value=bool(self._default),
-                         id=f"sw_{self._safe_id()}")
+            yield Switch(value=bool(self._default), id=f"sw_{self._safe_id()}")
         else:
             yield Input(
                 value=str(self._default),
@@ -89,7 +88,8 @@ class FieldInput(Horizontal):
         try:
             if self._ftype == "bool":
                 return self.query_one(f"#sw_{self._safe_id()}", Switch).value
-            raw = self.query_one(f"#inp_{self._safe_id()}", Input).value.strip()
+            raw = self.query_one(f"#inp_{self._safe_id()}",
+                                 Input).value.strip()
             if self._ftype == "int":
                 return int(float(raw)) if raw else 0
             if self._ftype == "float":
@@ -102,6 +102,7 @@ class FieldInput(Horizontal):
 # ---------------------------------------------------------------------------
 # FieldForm — scrollable list of FieldInputs for a message/request
 # ---------------------------------------------------------------------------
+
 
 class FieldForm(ScrollableContainer):
     DEFAULT_CSS = """
@@ -126,7 +127,8 @@ class FieldForm(ScrollableContainer):
     def compose(self) -> ComposeResult:
         if not self._fields:
             self.add_class("empty")
-            yield Static("  [dim]No fields — select a topic/service above[/dim]")
+            yield Static(
+                "  [dim]No fields — select a topic/service above[/dim]")
             return
         # Group by top-level prefix for visual separation
         current_group = None
@@ -149,6 +151,7 @@ class FieldForm(ScrollableContainer):
 # SearchBar — reusable dropdown search for topics/services
 # ---------------------------------------------------------------------------
 
+
 class SearchBar(Widget):
     """Simple single-stage dropdown search. Emits SearchBar.Chosen(value)."""
 
@@ -166,9 +169,11 @@ class SearchBar(Widget):
     """
 
     class Chosen(Message):
-        def __init__(self, value: str) -> None:
+
+        def __init__(self, value: str, source_id: str = "") -> None:
             super().__init__()
             self.value = value
+            self.source_id = source_id  # id() of the SearchBar that fired
 
     def __init__(self, placeholder: str = "search…", **kwargs):
         super().__init__(**kwargs)
@@ -193,8 +198,10 @@ class SearchBar(Widget):
                 background: $surface;
             }
             """
+
         # Use app-level OptionList like TopicSearchBar
         from textual.widgets import OptionList as OL
+
         self._dd = OL(id=f"sb_dd_{id(self)}")
         self._dd.display = False
         self._dd.styles.width = 50
@@ -215,10 +222,15 @@ class SearchBar(Widget):
 
     def _show(self, query: str) -> None:
         from textual.widgets._option_list import Option
-        matches = [o for o in self._options if query.lower() in o.lower()] if query else self._options
+
+        matches = ([o for o in self._options
+                    if query.lower() in o.lower()] if query else self._options)
         self._dd.clear_options()
         if matches:
-            self._dd.add_options([Option(o, id=o.replace("/", "__").replace(".", "_")) for o in matches])
+            self._dd.add_options([
+                Option(o, id=o.replace("/", "__").replace(".", "_"))
+                for o in matches
+            ])
             self._reposition()
             self._dd.display = True
         else:
@@ -234,7 +246,8 @@ class SearchBar(Widget):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "sb_input" and event.value.strip():
             self._hide()
-            self.post_message(self.Chosen(event.value.strip()))
+            self.post_message(
+                self.Chosen(event.value.strip(), source_id=str(id(self))))
             event.input.value = ""
 
     def on_key(self, event) -> None:
@@ -255,13 +268,15 @@ class SearchBar(Widget):
                 self.query_one("#sb_input", Input).value = ""
             except NoMatches:
                 pass
-            self.post_message(self.Chosen(str(event.option.prompt)))
+            self.post_message(
+                self.Chosen(str(event.option.prompt), source_id=str(id(self))))
             event.stop()
 
 
 # ---------------------------------------------------------------------------
 # PublisherPane
 # ---------------------------------------------------------------------------
+
 
 class PublisherPane(Vertical):
     DEFAULT_CSS = """
@@ -293,22 +308,23 @@ class PublisherPane(Vertical):
 
     def __init__(self, store: DataStore, bridge, **kwargs):
         super().__init__(**kwargs)
-        self._store   = store
-        self._bridge  = bridge
-        self._topic   = ""
+        self._store = store
+        self._bridge = bridge
+        self._topic = ""
         self._msgtype = ""
         self._repeating = False
         self._hz = 1.0
 
     def compose(self) -> ComposeResult:
         yield Static(" ▶ Topic Publisher", id="pub_header")
-        yield SearchBar(placeholder="search topic to publish on…", id="pub_search")
-        yield Static("  [dim]Select a topic above to load fields[/dim]", id="pub_topic_label")
+        yield SearchBar(placeholder="search topic to publish on…",
+                        id="pub_search")
+        yield Static("  [dim]Select a topic above to load fields[/dim]",
+                     id="pub_topic_label")
         with Horizontal(id="pub_controls"):
             yield Button("Publish", id="pub_btn", variant="primary")
             yield Button("Repeat OFF", id="pub_repeat", variant="default")
-            yield Input("1", id="pub_hz_inp", placeholder="Hz",
-                        type="number")
+            yield Input("1", id="pub_hz_inp", placeholder="Hz", type="number")
             yield Label("Hz")
         yield FieldForm([], id="pub_form")
         yield Static("", id="pub_status")
@@ -324,7 +340,8 @@ class PublisherPane(Vertical):
             pass
 
     def on_search_bar_chosen(self, event: SearchBar.Chosen) -> None:
-        if self.query_one("#pub_search", SearchBar) in self.query(SearchBar):
+        pub_search = self.query_one("#pub_search", SearchBar)
+        if event.source_id == str(id(pub_search)):
             self._load_topic(event.value)
             event.stop()
 
@@ -338,8 +355,7 @@ class PublisherPane(Vertical):
             return
         self._msgtype = snap.msg_type
         self.query_one("#pub_topic_label", Static).update(
-            f"  [cyan]{topic}[/cyan]  [dim]{self._msgtype}[/dim]"
-        )
+            f"  [cyan]{topic}[/cyan]  [dim]{self._msgtype}[/dim]")
         # Introspect fields
         if self._bridge:
             fields = self._bridge.get_msg_fields(self._msgtype)
@@ -367,25 +383,32 @@ class PublisherPane(Vertical):
         except NoMatches:
             values = {}
         if self._bridge:
+
             def cb(ok, err):
                 msg = "✓ Published" if ok else f"✗ {err}"
                 self.app.call_from_thread(self._set_status, msg)
-            self._bridge.publish_topic(self._topic, self._msgtype, values, on_done=cb)
+
+            self._bridge.publish_topic(self._topic,
+                                       self._msgtype,
+                                       values,
+                                       on_done=cb)
         else:
-            self._set_status(f"[dim]demo: publish {self._topic} {values}[/dim]")
+            self._set_status(
+                f"[dim]demo: publish {self._topic} {values}[/dim]")
 
     def _toggle_repeat(self) -> None:
         self._repeating = not self._repeating
         btn = self.query_one("#pub_repeat", Button)
         if self._repeating:
             try:
-                self._hz = float(self.query_one("#pub_hz_inp", Input).value or "1")
+                self._hz = float(
+                    self.query_one("#pub_hz_inp", Input).value or "1")
             except ValueError:
                 self._hz = 1.0
             btn.label = f"Repeat {self._hz:.1f}Hz"
             btn.variant = "warning"
             self._repeat_timer = self.set_interval(1.0 / max(self._hz, 0.1),
-                                                    self._do_publish)
+                                                   self._do_publish)
         else:
             btn.label = "Repeat OFF"
             btn.variant = "default"
@@ -402,6 +425,7 @@ class PublisherPane(Vertical):
 # ---------------------------------------------------------------------------
 # ServicePane
 # ---------------------------------------------------------------------------
+
 
 class ServicePane(Vertical):
     DEFAULT_CSS = """
@@ -433,21 +457,24 @@ class ServicePane(Vertical):
 
     def __init__(self, store: DataStore, bridge, **kwargs):
         super().__init__(**kwargs)
-        self._store   = store
-        self._bridge  = bridge
+        self._store = store
+        self._bridge = bridge
         self._service = ""
         self._srvtype = ""
 
     def compose(self) -> ComposeResult:
         yield Static(" ⚡ Service Caller", id="srv_header")
         yield SearchBar(placeholder="search service to call…", id="srv_search")
-        yield Static("  [dim]Select a service above to load request fields[/dim]",
-                     id="srv_service_label")
+        yield Static(
+            "  [dim]Select a service above to load request fields[/dim]",
+            id="srv_service_label",
+        )
         with Horizontal(id="srv_controls"):
             yield Button("Call", id="srv_btn", variant="warning")
         yield FieldForm([], id="srv_form")
         yield Static("", id="srv_status")
-        yield Static("[dim]  Response will appear here[/dim]", id="srv_response")
+        yield Static("[dim]  Response will appear here[/dim]",
+                     id="srv_response")
 
     def on_mount(self) -> None:
         self.set_interval(2.0, self._refresh_services)
@@ -460,7 +487,8 @@ class ServicePane(Vertical):
             pass
 
     def on_search_bar_chosen(self, event: SearchBar.Chosen) -> None:
-        if self.query_one("#srv_search", SearchBar) in self.query(SearchBar):
+        srv_search = self.query_one("#srv_search", SearchBar)
+        if event.source_id == str(id(srv_search)):
             self._load_service(event.value)
             event.stop()
 
@@ -473,8 +501,7 @@ class ServicePane(Vertical):
             return
         self._srvtype = snap.srv_type
         self.query_one("#srv_service_label", Static).update(
-            f"  [yellow]{service}[/yellow]  [dim]{self._srvtype}[/dim]"
-        )
+            f"  [yellow]{service}[/yellow]  [dim]{self._srvtype}[/dim]")
         if self._bridge:
             fields = self._bridge.get_srv_fields(self._srvtype)
         else:
@@ -500,25 +527,29 @@ class ServicePane(Vertical):
         self._set_status("Calling…")
         self.query_one("#srv_response", Static).update("[dim]waiting…[/dim]")
         if self._bridge:
+
             def cb(ok, err, resp):
                 if ok:
                     self.app.call_from_thread(self._set_status, "✓ Success")
                     self.app.call_from_thread(
                         self.query_one("#srv_response", Static).update,
-                        Text(str(resp) or "(empty response)", style="green")
+                        Text(str(resp) or "(empty response)", style="green"),
                     )
                 else:
                     self.app.call_from_thread(self._set_status, f"✗ {err}")
                     self.app.call_from_thread(
                         self.query_one("#srv_response", Static).update,
-                        Text(f"Error: {err}", style="red")
+                        Text(f"Error: {err}", style="red"),
                     )
-            self._bridge.call_service(self._service, self._srvtype, values, on_done=cb)
+
+            self._bridge.call_service(self._service,
+                                      self._srvtype,
+                                      values,
+                                      on_done=cb)
         else:
             self._set_status("[dim]demo mode — no ROS[/dim]")
             self.query_one("#srv_response", Static).update(
-                "[dim]success: True\nmessage: 'demo response'[/dim]"
-            )
+                "[dim]success: True\nmessage: 'demo response'[/dim]")
 
     def _set_status(self, msg: str) -> None:
         try:
@@ -531,40 +562,93 @@ class ServicePane(Vertical):
 # Demo field helpers (--no-ros mode)
 # ---------------------------------------------------------------------------
 
+
 def _demo_fields_for(msg_type: str) -> List[dict]:
     _known = {
         "geometry_msgs/msg/Twist": [
-            {"path": "linear.x",  "type": "float", "default": 0.0},
-            {"path": "linear.y",  "type": "float", "default": 0.0},
-            {"path": "linear.z",  "type": "float", "default": 0.0},
-            {"path": "angular.x", "type": "float", "default": 0.0},
-            {"path": "angular.y", "type": "float", "default": 0.0},
-            {"path": "angular.z", "type": "float", "default": 0.0},
+            {
+                "path": "linear.x",
+                "type": "float",
+                "default": 0.0
+            },
+            {
+                "path": "linear.y",
+                "type": "float",
+                "default": 0.0
+            },
+            {
+                "path": "linear.z",
+                "type": "float",
+                "default": 0.0
+            },
+            {
+                "path": "angular.x",
+                "type": "float",
+                "default": 0.0
+            },
+            {
+                "path": "angular.y",
+                "type": "float",
+                "default": 0.0
+            },
+            {
+                "path": "angular.z",
+                "type": "float",
+                "default": 0.0
+            },
         ],
         "std_msgs/msg/Bool": [
-            {"path": "data", "type": "bool", "default": False},
+            {
+                "path": "data",
+                "type": "bool",
+                "default": False
+            },
         ],
         "std_msgs/msg/Float64": [
-            {"path": "data", "type": "float", "default": 0.0},
+            {
+                "path": "data",
+                "type": "float",
+                "default": 0.0
+            },
         ],
         "std_msgs/msg/String": [
-            {"path": "data", "type": "str", "default": ""},
+            {
+                "path": "data",
+                "type": "str",
+                "default": ""
+            },
         ],
         "std_msgs/msg/Int32": [
-            {"path": "data", "type": "int", "default": 0},
+            {
+                "path": "data",
+                "type": "int",
+                "default": 0
+            },
         ],
     }
-    return _known.get(msg_type, [{"path": "data", "type": "str", "default": ""}])
+    return _known.get(msg_type, [{
+        "path": "data",
+        "type": "str",
+        "default": ""
+    }])
 
 
 def _demo_srv_fields_for(srv_type: str) -> List[dict]:
     _known = {
         "std_srvs/srv/SetBool": [
-            {"path": "data", "type": "bool", "default": False},
+            {
+                "path": "data",
+                "type": "bool",
+                "default": False
+            },
         ],
         "std_srvs/srv/Trigger": [],
         "rcl_interfaces/srv/SetParameters": [
-            {"path": "parameters", "type": "str", "default": "[]"},
+            {
+                "path": "parameters",
+                "type": "str",
+                "default": "[]"
+            },
         ],
     }
     return _known.get(srv_type, [])
@@ -574,11 +658,11 @@ def _demo_srv_fields_for(srv_type: str) -> List[dict]:
 # InteractorPanel — Tab 6
 # ---------------------------------------------------------------------------
 
-class InteractorPanel(Widget):
 
+class InteractorPanel(Widget):
     BINDINGS = [
-        Binding("ctrl+b", "focus_publisher",  "Publisher",  show=True),
-        Binding("ctrl+k", "focus_service",    "Service",    show=True),
+        Binding("ctrl+b", "focus_publisher", "Publisher", show=True),
+        Binding("ctrl+k", "focus_service", "Service", show=True),
     ]
 
     DEFAULT_CSS = """
@@ -590,12 +674,12 @@ class InteractorPanel(Widget):
 
     def __init__(self, store: DataStore, bridge, **kwargs):
         super().__init__(**kwargs)
-        self._store  = store
+        self._store = store
         self._bridge = bridge
 
     def compose(self) -> ComposeResult:
         yield PublisherPane(self._store, self._bridge, id="pub_pane")
-        yield ServicePane(self._store, self._bridge,  id="srv_pane")
+        yield ServicePane(self._store, self._bridge, id="srv_pane")
 
     def action_focus_publisher(self) -> None:
         try:
