@@ -29,11 +29,11 @@ from typing import Any, Dict, List, Optional, Set
 
 log = logging.getLogger("ros_bridge")
 
-
 # ---------------------------------------------------------------------------
 # Lazy rclpy import — lets the module load even without ROS installed,
 # so we can unit-test DataStore and proc_utils independently.
 # ---------------------------------------------------------------------------
+
 
 def _try_import_rclpy():
     try:
@@ -44,7 +44,18 @@ def _try_import_rclpy():
         from rcl_interfaces.msg import Log as RosoutMsg
         from rcl_interfaces.srv import GetParameters, SetParameters, ListParameters
         from tf2_msgs.msg import TFMessage
-        return rclpy, Node, SingleThreadedExecutor, QoSProfile, RosoutMsg,                GetParameters, SetParameters, ListParameters, TFMessage
+
+        return (
+            rclpy,
+            Node,
+            SingleThreadedExecutor,
+            QoSProfile,
+            RosoutMsg,
+            GetParameters,
+            SetParameters,
+            ListParameters,
+            TFMessage,
+        )
     except ImportError:
         return None
 
@@ -66,6 +77,7 @@ def _detect_qos_mismatch(pub_reliability: str, sub_reliability: str) -> bool:
 # ---------------------------------------------------------------------------
 # RosBridge
 # ---------------------------------------------------------------------------
+
 
 class RosBridge:
     """
@@ -93,6 +105,9 @@ class RosBridge:
         # Topic info cache from last discovery
         self._known_topics: Set[str] = set()
 
+        # Previous ROS stamp per TF edge {(parent, child): stamp_sec}
+        self._tf_prev_stamp: Dict[tuple, float] = {}
+
         # rclpy objects — set in _spin_thread
         self._rclpy = None
         self._node = None
@@ -117,11 +132,9 @@ class RosBridge:
         if self._thread:
             self._thread.join(timeout=5.0)
 
-    def set_param(self,
-                  node: str,
-                  param: str,
-                  value: Any,
-                  on_done: Optional[callable] = None) -> None:
+    def set_param(
+        self, node: str, param: str, value: Any, on_done: Optional[callable] = None
+    ) -> None:
         """
         Request a parameter change. Non-blocking — queued for the spin thread.
         on_done(success: bool, error: str) called on completion (from spin thread).
@@ -141,15 +154,17 @@ class RosBridge:
         """Refresh service list — queued for spin thread."""
         self._param_set_queue.put(("__list_services__", None, None, None))
 
-    def publish_topic(self, topic: str, msg_type_str: str,
-                      field_values: dict, on_done=None) -> None:
+    def publish_topic(
+        self, topic: str, msg_type_str: str, field_values: dict, on_done=None
+    ) -> None:
         """Publish a single message to a topic."""
         self._param_set_queue.put(
             ("__pub__", topic, (msg_type_str, field_values), on_done)
         )
 
-    def call_service(self, service: str, srv_type_str: str,
-                     field_values: dict, on_done=None) -> None:
+    def call_service(
+        self, service: str, srv_type_str: str, field_values: dict, on_done=None
+    ) -> None:
         """Call a service with given request fields."""
         self._param_set_queue.put(
             ("__srv__", service, (srv_type_str, field_values), on_done)
@@ -191,10 +206,17 @@ class RosBridge:
             self._run_disconnected_loop()
             return
 
-        (rclpy, Node, SingleThreadedExecutor,
-         QoSProfile, RosoutMsg,
-         GetParameters, SetParameters, ListParameters,
-         TFMessage) = imports
+        (
+            rclpy,
+            Node,
+            SingleThreadedExecutor,
+            QoSProfile,
+            RosoutMsg,
+            GetParameters,
+            SetParameters,
+            ListParameters,
+            TFMessage,
+        ) = imports
 
         self._rclpy = rclpy
 
@@ -224,22 +246,48 @@ class RosBridge:
 
         # Subscribe to /tf and /tf_static
         try:
+            from rclpy.qos import (
+                QoSProfile,
+                DurabilityPolicy,
+                ReliabilityPolicy,
+                HistoryPolicy,
+            )
+
+            tf_qos = QoSProfile(
+                depth=100,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.VOLATILE,
+                history=HistoryPolicy.KEEP_LAST,
+            )
+            tf_static_qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                history=HistoryPolicy.KEEP_LAST,
+            )
             self._node.create_subscription(
-                TFMessage, "/tf",
-                lambda msg: self._on_tf_msg(msg, is_static=False), 100)
+                TFMessage,
+                "/tf",
+                lambda msg: self._on_tf_msg(msg, is_static=False),
+                tf_qos,
+            )
             self._node.create_subscription(
-                TFMessage, "/tf_static",
-                lambda msg: self._on_tf_msg(msg, is_static=True), 100)
+                TFMessage,
+                "/tf_static",
+                lambda msg: self._on_tf_msg(msg, is_static=True),
+                tf_static_qos,
+            )
         except Exception as e:
             log.warning(f"Could not subscribe to /tf: {e}")
 
         # Timers
-        self._node.create_timer(1.0,  self._tick_resources)
-        self._node.create_timer(2.0,  self._tick_discovery)
-        self._node.create_timer(0.1,  self._tick_param_queue)
+        self._node.create_timer(1.0, self._tick_resources)
+        self._node.create_timer(2.0, self._tick_discovery)
+        self._node.create_timer(0.1, self._tick_param_queue)
 
         # Lazy import ResourceMonitor here so it's in the right thread
         from .proc_utils import ResourceMonitor
+
         self._resource_monitor = ResourceMonitor()
 
         # Initial discovery immediately
@@ -369,14 +417,14 @@ class RosBridge:
 
             # QoS from first publisher
             pub_reliability = "unknown"
-            pub_durability  = "unknown"
+            pub_durability = "unknown"
             sub_reliability = "unknown"
-            qos_mismatch    = False
+            qos_mismatch = False
 
             if pub_info:
                 qos = pub_info[0].qos_profile
                 pub_reliability = str(qos.reliability).split(".")[-1].lower()
-                pub_durability  = str(qos.durability).split(".")[-1].lower()
+                pub_durability = str(qos.durability).split(".")[-1].lower()
 
             if sub_info:
                 qos = sub_info[0].qos_profile
@@ -437,7 +485,8 @@ class RosBridge:
         # Populate plottable field list on first message (for the field picker UI)
         if topic not in self._store._topic_fields:
             numeric_fields = [
-                f["path"] for f in self._describe_fields(msg)
+                f["path"]
+                for f in self._describe_fields(msg)
                 if f["type"] in ("int", "float")
             ]
             if numeric_fields:
@@ -575,6 +624,7 @@ class RosBridge:
         e.g. "std_msgs/msg/Float64" → std_msgs.msg.Float64
         """
         import importlib
+
         try:
             # type_str format: "package/msg/TypeName"
             parts = type_str.split("/")
@@ -598,13 +648,17 @@ class RosBridge:
         try:
             result = subprocess.run(
                 ["ros2", "param", "dump", ros_node],
-                capture_output=True, text=True, timeout=8.0,
+                capture_output=True,
+                text=True,
+                timeout=8.0,
             )
         except Exception as e:
             log.warning(f"param dump failed for {ros_node}: {e}")
             return
 
-        log.debug(f"param dump [{ros_node}] rc={result.returncode} stdout={result.stdout[:300]!r}")
+        log.debug(
+            f"param dump [{ros_node}] rc={result.returncode} stdout={result.stdout[:300]!r}"
+        )
 
         if result.returncode != 0 or not result.stdout.strip():
             log.warning(f"param dump failed for {ros_node}: {result.stderr.strip()}")
@@ -648,50 +702,41 @@ class RosBridge:
                         break
 
         if not params_dict:
-            log.warning(f"no ros__parameters found for {ros_node}, keys={list(data.keys())}")
+            log.warning(
+                f"no ros__parameters found for {ros_node}, keys={list(data.keys())}"
+            )
             return
 
-        def _flatten(d: dict, prefix: str = "") -> Dict[str, Any]:
-            """Recursively flatten nested param dicts into dot-notation keys."""
-            out: Dict[str, Any] = {}
-            for k, v in d.items():
-                full_key = f"{prefix}.{k}" if prefix else k
-                if isinstance(v, dict):
-                    out.update(_flatten(v, full_key))
-                else:
-                    out[full_key] = v
-            return out
-
-        flat = _flatten(params_dict)
         snapshots: Dict[str, ParamSnapshot] = {}
-        for pname, pval in flat.items():
+        for pname, pval in params_dict.items():
             snapshots[pname] = ParamSnapshot(
-                node=ros_node, name=pname,
-                value=pval, type_name=type(pval).__name__,
+                node=ros_node,
+                name=pname,
+                value=pval,
+                type_name=type(pval).__name__,
             )
         self._store.update_params(ros_node, snapshots)
         log.info(f"Loaded {len(snapshots)} params for {ros_node}")
 
-    def _do_set_param(self,
-                      ros_node: str,
-                      param: str,
-                      value: Any,
-                      on_done: Optional[callable]) -> None:
+    def _do_set_param(
+        self, ros_node: str, param: str, value: Any, on_done: Optional[callable]
+    ) -> None:
         """
         Set a parameter via ros2 param set CLI.
         Records a change marker in the store for plot overlay.
         """
         # Get old value for the marker
         old_val = None
-        existing = {p.name: p.value
-                    for p in self._store.snapshot_params(ros_node)}
+        existing = {p.name: p.value for p in self._store.snapshot_params(ros_node)}
         old_val = existing.get(param)
 
         try:
             value_str = str(value)
             result = subprocess.run(
                 ["ros2", "param", "set", ros_node, param, value_str],
-                capture_output=True, text=True, timeout=5.0,
+                capture_output=True,
+                text=True,
+                timeout=5.0,
             )
             success = result.returncode == 0
             error_msg = result.stderr.strip() if not success else ""
@@ -706,13 +751,16 @@ class RosBridge:
         if success:
             # Record marker for plot overlay
             from .data_store import ParamChangeMarker
-            self._store.record_param_change(ParamChangeMarker(
-                timestamp=time.monotonic(),
-                node=ros_node,
-                param=param,
-                old_value=old_val,
-                new_value=value,
-            ))
+
+            self._store.record_param_change(
+                ParamChangeMarker(
+                    timestamp=time.monotonic(),
+                    node=ros_node,
+                    param=param,
+                    old_value=old_val,
+                    new_value=value,
+                )
+            )
             # Refresh params for this node
             self._do_fetch_params(ros_node)
             log.info(f"Set {ros_node} {param} = {value}")
@@ -732,60 +780,75 @@ class RosBridge:
             return
         try:
             from .data_store import ServiceSnapshot
+
             svc_list = self._node.get_service_names_and_types()
             services = {
-                name: ServiceSnapshot(name=name, srv_type=types[0] if types else "unknown")
+                name: ServiceSnapshot(
+                    name=name, srv_type=types[0] if types else "unknown"
+                )
                 for name, types in svc_list
             }
             self._store.update_services(services)
         except Exception as e:
             log.debug(f"Service discovery error: {e}")
 
-    def _do_publish(self, topic: str, msg_type_str: str,
-                    field_values: dict, on_done) -> None:
+    def _do_publish(
+        self, topic: str, msg_type_str: str, field_values: dict, on_done
+    ) -> None:
         try:
             msg_class = self._import_msg_type(msg_type_str)
             if msg_class is None:
-                if on_done: on_done(False, f"Unknown type: {msg_type_str}")
+                if on_done:
+                    on_done(False, f"Unknown type: {msg_type_str}")
                 return
             msg = msg_class()
             self._set_msg_fields(msg, field_values)
             pub = self._node.create_publisher(msg_class, topic, 1)
             pub.publish(msg)
             self._node.destroy_publisher(pub)
-            if on_done: on_done(True, "")
+            if on_done:
+                on_done(True, "")
         except Exception as e:
-            if on_done: on_done(False, str(e))
+            if on_done:
+                on_done(False, str(e))
 
-    def _do_call_service(self, service: str, srv_type_str: str,
-                         field_values: dict, on_done) -> None:
+    def _do_call_service(
+        self, service: str, srv_type_str: str, field_values: dict, on_done
+    ) -> None:
         try:
             srv_class = self._import_srv_type(srv_type_str)
             if srv_class is None:
-                if on_done: on_done(False, f"Unknown service type: {srv_type_str}", None)
+                if on_done:
+                    on_done(False, f"Unknown service type: {srv_type_str}", None)
                 return
             req = srv_class.Request()
             self._set_msg_fields(req, field_values)
             cli = self._node.create_client(srv_class, service)
             if not cli.wait_for_service(timeout_sec=3.0):
-                if on_done: on_done(False, "Service not available", None)
+                if on_done:
+                    on_done(False, "Service not available", None)
                 self._node.destroy_client(cli)
                 return
             future = cli.call_async(req)
             # Spin until done (blocking but in spin thread so safe)
             import rclpy
+
             rclpy.spin_until_future_complete(self._node, future, timeout_sec=5.0)
             self._node.destroy_client(cli)
             if future.done():
                 result = future.result()
-                if on_done: on_done(True, "", str(result))
+                if on_done:
+                    on_done(True, "", str(result))
             else:
-                if on_done: on_done(False, "Timeout", None)
+                if on_done:
+                    on_done(False, "Timeout", None)
         except Exception as e:
-            if on_done: on_done(False, str(e), None)
+            if on_done:
+                on_done(False, str(e), None)
 
     def _import_srv_type(self, type_str: str) -> Optional[Any]:
         import importlib
+
         try:
             parts = type_str.split("/")
             if len(parts) != 3:
@@ -796,7 +859,9 @@ class RosBridge:
         except (ImportError, AttributeError):
             return None
 
-    def _describe_fields(self, obj: Any, prefix: str = "", depth: int = 0) -> List[dict]:
+    def _describe_fields(
+        self, obj: Any, prefix: str = "", depth: int = 0
+    ) -> List[dict]:
         """Return list of {path, type, default} for all leaf fields of a msg."""
         if depth > 4:
             return []
@@ -848,12 +913,33 @@ class RosBridge:
 
     def _on_tf_msg(self, msg: Any, is_static: bool) -> None:
         """Handle /tf and /tf_static messages — update staleness tracker."""
-        now = time.monotonic()
+        mono_now = time.monotonic()
         try:
             for transform in msg.transforms:
                 parent = transform.header.frame_id
-                child  = transform.child_frame_id
-                self._store.update_tf(parent, child, now, is_static=is_static)
+                child = transform.child_frame_id
+                stamp_sec = (
+                    transform.header.stamp.sec + transform.header.stamp.nanosec * 1e-9
+                )
+                # Age = gap between this stamp and the previous stamp for this edge.
+                # Pure ROS-time delta — no wall clock, no epoch mismatch.
+                key = (parent, child)
+                prev_stamp = self._tf_prev_stamp.get(key)
+                if prev_stamp is not None and stamp_sec > 0:
+                    stamp_age_s = (
+                        stamp_sec - prev_stamp
+                    )  # positive = gap between messages
+                else:
+                    stamp_age_s = -1.0  # first message — no previous to diff against
+                if stamp_sec > 0:
+                    self._tf_prev_stamp[key] = stamp_sec
+                self._store.update_tf(
+                    parent,
+                    child,
+                    stamp_age_s=stamp_age_s,
+                    last_received=mono_now,
+                    is_static=is_static,
+                )
         except Exception as e:
             log.debug(f"TF callback error: {e}")
 

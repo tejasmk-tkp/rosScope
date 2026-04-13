@@ -38,13 +38,13 @@ from core.data_store import DataStore, TFTransform
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-_DEFAULT_WARN_MS  = 100
+_DEFAULT_WARN_MS = 100
 _DEFAULT_ERROR_MS = 500
-
 
 # ---------------------------------------------------------------------------
 # Tree builder
 # ---------------------------------------------------------------------------
+
 
 def _build_tree(transforms: List[TFTransform]) -> Dict[str, List[str]]:
     """Build parent→[children] adjacency from a flat list of transforms."""
@@ -78,14 +78,17 @@ def _render_dynamic_tree(
     result = Text()
 
     def _get_age_s(tf: TFTransform) -> Tuple[float, bool]:
-        """Returns (age_seconds, is_stamp_based).
-        Uses ROS stamp age if available, falls back to wall-clock last_received age."""
+        """Returns (period_seconds, is_stamp_based).
+        stamp_age_s holds the ROS-stamp delta between the last two messages.
+        Falls back to wall-clock recv gap if no stamp delta yet."""
         if tf.stamp_age_s >= 0:
             return tf.stamp_age_s, True
         return now - tf.last_received, False
 
     def _age_style(age_s: float) -> Tuple[str, str]:
         age_ms = age_s * 1000
+        # For stamp-delta mode: this is the publish period, so smaller = faster = good.
+        # warn/error thresholds still apply: if period > threshold, broadcaster is slow.
         label = f"{age_ms:6.1f}ms"
         if age_ms < warn_ms:
             return "bright_green", label
@@ -106,7 +109,7 @@ def _render_dynamic_tree(
             is_stale = age_s * 1000 >= error_ms
             frame_style = ("bold " + color) if is_stale else color
             result.append(frame, style=frame_style)
-            age_source = "stamp" if stamp_based else "recv"
+            age_source = "period" if stamp_based else "recv"
             result.append(f"  [{age_label} {age_source}]", style=color)
             if is_stale:
                 result.append(" ✗ STALE", style="bold bright_red")
@@ -145,15 +148,13 @@ def _render_static_tree(transforms: List[TFTransform]) -> Text:
         connector = "└── " if is_last else "├── "
         extension = "    " if is_last else "│   "
         result.append(prefix + connector, style="bright_black")
-        result.append(f"{frame}  [static]\n",
-                      style="grey62 italic")
+        result.append(f"{frame}  [static]\n", style="grey62 italic")
         kids = sorted(children.get(frame, []))
         for i, kid in enumerate(kids):
             _walk(kid, prefix + extension, i == len(kids) - 1)
 
     for i, root in enumerate(roots):
-        result.append(f"  {root}  [static root]\n",
-                      style="grey62 italic")
+        result.append(f"  {root}  [static root]\n", style="grey62 italic")
         kids = sorted(children.get(root, []))
         for j, kid in enumerate(kids):
             _walk(kid, "  ", j == len(kids) - 1)
@@ -164,6 +165,7 @@ def _render_static_tree(transforms: List[TFTransform]) -> Text:
 # ---------------------------------------------------------------------------
 # Threshold bar
 # ---------------------------------------------------------------------------
+
 
 class ThresholdBar(Horizontal):
     DEFAULT_CSS = """
@@ -180,12 +182,12 @@ class ThresholdBar(Horizontal):
 
     class ThresholdsChanged(object):
         def __init__(self, warn_ms: float, error_ms: float):
-            self.warn_ms  = warn_ms
+            self.warn_ms = warn_ms
             self.error_ms = error_ms
 
     def compose(self) -> ComposeResult:
         yield Label("Warn:")
-        yield Input(str(_DEFAULT_WARN_MS),  id="warn_input",  type="integer")
+        yield Input(str(_DEFAULT_WARN_MS), id="warn_input", type="integer")
         yield Label("ms   Error:")
         yield Input(str(_DEFAULT_ERROR_MS), id="error_input", type="integer")
         yield Label("ms")
@@ -193,7 +195,7 @@ class ThresholdBar(Horizontal):
 
     def get_thresholds(self) -> Tuple[float, float]:
         try:
-            warn  = float(self.query_one("#warn_input",  Input).value)
+            warn = float(self.query_one("#warn_input", Input).value)
             error = float(self.query_one("#error_input", Input).value)
             return warn, error
         except (ValueError, NoMatches):
@@ -203,6 +205,7 @@ class ThresholdBar(Horizontal):
 # ---------------------------------------------------------------------------
 # Tree view widgets
 # ---------------------------------------------------------------------------
+
 
 class DynamicTreeView(ScrollableContainer):
     DEFAULT_CSS = """
@@ -252,6 +255,7 @@ class StaticTreeView(ScrollableContainer):
 # TFTreePanel
 # ---------------------------------------------------------------------------
 
+
 class TFTreePanel(Widget):
     DEFAULT_CSS = """
     TFTreePanel {
@@ -283,8 +287,8 @@ class TFTreePanel(Widget):
 
     def __init__(self, store: DataStore, **kwargs):
         super().__init__(**kwargs)
-        self._store    = store
-        self._warn_ms  = float(_DEFAULT_WARN_MS)
+        self._store = store
+        self._warn_ms = float(_DEFAULT_WARN_MS)
         self._error_ms = float(_DEFAULT_ERROR_MS)
 
     def compose(self) -> ComposeResult:
@@ -292,19 +296,15 @@ class TFTreePanel(Widget):
         with Horizontal(id="tf_trees"):
             with Vertical(id="dynamic_col"):
                 yield Static(
-                    " ⟳ Dynamic TF  (/tf)  — live staleness",
-                    id="dynamic_header"
+                    " ⟳ Dynamic TF  (/tf)  — live staleness", id="dynamic_header"
                 )
                 yield DynamicTreeView(id="dynamic_tree")
             with Vertical(id="static_col"):
-                yield Static(
-                    " ◈ Static TF  (/tf_static)",
-                    id="static_header"
-                )
+                yield Static(" ◈ Static TF  (/tf_static)", id="static_header")
                 yield StaticTreeView(id="static_tree")
 
     def on_mount(self) -> None:
-        self.set_interval(0.25, self._refresh)   # 4Hz — fast enough to see staleness
+        self.set_interval(0.25, self._refresh)  # 4Hz — fast enough to see staleness
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "apply_btn":
@@ -322,7 +322,7 @@ class TFTreePanel(Widget):
         sta_text = _render_static_tree(static)
 
         self.query_one("#dynamic_tree", DynamicTreeView).update(dyn_text)
-        self.query_one("#static_tree",  StaticTreeView).update(sta_text)
+        self.query_one("#static_tree", StaticTreeView).update(sta_text)
 
         # Update dynamic header with summary counts
         def _age_ms(t: "TFTransform") -> float:
@@ -332,7 +332,7 @@ class TFTreePanel(Widget):
 
         total = len(dynamic)
         stale = sum(1 for t in dynamic if _age_ms(t) >= self._error_ms)
-        warn  = sum(1 for t in dynamic if self._warn_ms <= _age_ms(t) < self._error_ms)
+        warn = sum(1 for t in dynamic if self._warn_ms <= _age_ms(t) < self._error_ms)
 
         if stale:
             status = f"[bold bright_red] {stale} STALE[/bold bright_red]"
