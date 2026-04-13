@@ -158,14 +158,6 @@ class SearchBar(Widget):
     DEFAULT_CSS = """
     SearchBar { height: 3; width: 1fr; }
     #sb_input { height: 3; width: 1fr; }
-    #sb_dropdown {
-        display: none;
-        height: auto;
-        max-height: 10;
-        width: 50;
-        border: tall $accent;
-        background: $surface;
-    }
     """
 
     class Chosen(Message):
@@ -179,76 +171,74 @@ class SearchBar(Widget):
         super().__init__(**kwargs)
         self._placeholder = placeholder
         self._options: List[str] = []
+        self._matches: List[str] = []
 
     def compose(self) -> ComposeResult:
         yield Input(placeholder=self._placeholder, id="sb_input")
 
     def on_mount(self) -> None:
-        from textual.widgets import OptionList
-        from textual.widgets._option_list import Option
-
-        class _DD(Widget):
-            DEFAULT_CSS = """
-            _DD {
-                display: none;
-                height: auto;
-                max-height: 10;
-                width: 50;
-                border: tall $accent;
-                background: $surface;
-            }
-            """
-
-        # Use app-level OptionList like TopicSearchBar
         from textual.widgets import OptionList as OL
 
+        # Mount inside self so OptionList.OptionSelected bubbles through SearchBar
         self._dd = OL(id=f"sb_dd_{id(self)}")
         self._dd.display = False
-        self._dd.styles.width = 50
+        self._dd.styles.layer = "above"
+        self._dd.styles.dock = "top"
+        self._dd.styles.offset = (0, 3)
+        self._dd.styles.width = "1fr"
         self._dd.styles.max_height = 10
-        self.app.mount(self._dd)
+        self._dd.styles.background = ""
+        self._dd.styles.border = ("tall", "")
+        self.mount(self._dd)
 
     def set_options(self, options: List[str]) -> None:
         self._options = options
 
-    def _reposition(self) -> None:
-        try:
-            inp = self.query_one("#sb_input", Input)
-            off = inp.screen_offset
-            self._dd.styles.offset = (off.x, off.y + 3)
-            self._dd.styles.width = max(inp.size.width, 40)
-        except Exception:
-            pass
-
     def _show(self, query: str) -> None:
         from textual.widgets._option_list import Option
 
-        matches = ([o for o in self._options
-                    if query.lower() in o.lower()] if query else self._options)
+        self._matches = (
+            [o for o in self._options
+             if query.lower() in o.lower()] if query else list(self._options))
         self._dd.clear_options()
-        if matches:
+        if self._matches:
             self._dd.add_options([
                 Option(o, id=o.replace("/", "__").replace(".", "_"))
-                for o in matches
+                for o in self._matches
             ])
-            self._reposition()
             self._dd.display = True
         else:
             self._dd.display = False
 
     def _hide(self) -> None:
         self._dd.display = False
+        self._matches = []
+
+    def _choose(self, value: str) -> None:
+        self._hide()
+        try:
+            self.query_one("#sb_input", Input).value = ""
+        except NoMatches:
+            pass
+        self.post_message(self.Chosen(value, source_id=str(id(self))))
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "sb_input":
             self._show(event.value)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id == "sb_input" and event.value.strip():
-            self._hide()
-            self.post_message(
-                self.Chosen(event.value.strip(), source_id=str(id(self))))
-            event.input.value = ""
+        if event.input.id != "sb_input":
+            return
+        # If dropdown is open, pick the highlighted item (or first match)
+        if self._dd.display and self._matches:
+            highlighted = self._dd.highlighted
+            pick = (self._matches[highlighted]
+                    if highlighted is not None else self._matches[0])
+            self._choose(pick)
+            event.stop()
+        elif event.value.strip():
+            # Dropdown not open — submit raw text as-is (fallback)
+            self._choose(event.value.strip())
 
     def on_key(self, event) -> None:
         if not self._dd.display:
@@ -261,15 +251,8 @@ class SearchBar(Widget):
             event.stop()
 
     def on_option_list_option_selected(self, event) -> None:
-        # This bubbles up from the app-level dropdown
         if event.option_list is self._dd:
-            self._hide()
-            try:
-                self.query_one("#sb_input", Input).value = ""
-            except NoMatches:
-                pass
-            self.post_message(
-                self.Chosen(str(event.option.prompt), source_id=str(id(self))))
+            self._choose(str(event.option.prompt))
             event.stop()
 
 
