@@ -153,7 +153,7 @@ class FieldForm(ScrollableContainer):
 
 
 class SearchBar(Widget):
-    """Simple single-stage dropdown search. Emits SearchBar.Chosen(value)."""
+    """Dropdown search bar. Type to filter, arrow keys to navigate, Enter to select."""
 
     DEFAULT_CSS = """
     SearchBar { height: 3; width: 1fr; }
@@ -167,7 +167,7 @@ class SearchBar(Widget):
             self.value = value
             self.source_id = source_id
 
-    def __init__(self, placeholder: str = "search…", **kwargs):
+    def __init__(self, placeholder: str = "search\u2026", **kwargs):
         super().__init__(**kwargs)
         self._placeholder = placeholder
         self._options: List[str] = []
@@ -183,26 +183,8 @@ class SearchBar(Widget):
         self._dd = OL(id=f"sb_dd_{id(self)}")
         self._dd.display = False
         self._dd.styles.max_height = 10
-        # Back-reference so InteractorPanel can dispatch selection back to us
         self._dd._search_bar_owner = self
-        # Also intercept Enter key while the OptionList has focus
-        self._dd.on_key = self._dd_on_key
         self.app.mount(self._dd)
-
-    def _dd_on_key(self, event) -> None:
-        """Handle keys while the dropdown OptionList is focused."""
-        if event.key == "enter":
-            highlighted = self._dd.highlighted
-            if highlighted is not None and highlighted < len(self._matches):
-                self._choose(self._matches[highlighted])
-                event.stop()
-        elif event.key == "escape":
-            self._hide()
-            try:
-                self.query_one("#sb_input", Input).focus()
-            except Exception:
-                pass
-            event.stop()
 
     def on_unmount(self) -> None:
         if self._dd is not None:
@@ -250,10 +232,16 @@ class SearchBar(Widget):
     def _choose(self, value: str) -> None:
         self._hide()
         try:
-            self.query_one("#sb_input", Input).value = ""
+            inp = self.query_one("#sb_input", Input)
+            inp.value = ""
+            inp.focus()
         except NoMatches:
             pass
         self.post_message(self.Chosen(value, source_id=str(id(self))))
+
+    def is_dd_focused(self) -> bool:
+        return (self._dd is not None and self._dd.display
+                and self.app.focused is self._dd)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "sb_input":
@@ -267,9 +255,9 @@ class SearchBar(Widget):
             pick = (self._matches[highlighted]
                     if highlighted is not None else self._matches[0])
             self._choose(pick)
-            event.stop()
         elif event.value.strip():
             self._choose(event.value.strip())
+        event.stop()
 
     def on_key(self, event) -> None:
         if self._dd is None or not self._dd.display:
@@ -281,13 +269,13 @@ class SearchBar(Widget):
             self._dd.focus()
             event.stop()
         elif event.key == "enter":
-            # Enter while input still has focus — pick first match
-            if self._matches:
-                highlighted = self._dd.highlighted
-                pick = (self._matches[highlighted]
-                        if highlighted is not None else self._matches[0])
+            highlighted = self._dd.highlighted
+            pick = (self._matches[highlighted] if highlighted is not None
+                    and highlighted < len(self._matches) else
+                    self._matches[0] if self._matches else None)
+            if pick:
                 self._choose(pick)
-                event.stop()
+            event.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -710,9 +698,30 @@ class InteractorPanel(Widget):
         except NoMatches:
             pass
 
+    def on_key(self, event) -> None:
+        """Catch Enter/Escape while a dropdown OptionList has focus."""
+        focused = self.app.focused
+        owner = getattr(focused, "_search_bar_owner", None)
+        if owner is None:
+            return
+        if event.key == "enter":
+            highlighted = focused.highlighted
+            matches = owner._matches
+            if matches:
+                pick = (matches[highlighted] if highlighted is not None
+                        and highlighted < len(matches) else matches[0])
+                owner._choose(pick)
+                event.stop()
+        elif event.key == "escape":
+            owner._hide()
+            try:
+                owner.query_one("#sb_input", Input).focus()
+            except Exception:
+                pass
+            event.stop()
+
     def on_option_list_option_selected(self, event) -> None:
-        # _dd is mounted on app so events bubble here not through SearchBar.
-        # _search_bar_owner points back to the owning SearchBar instance.
+        """Mouse-click or Space selection on an app-mounted dropdown."""
         owner = getattr(event.option_list, "_search_bar_owner", None)
         if owner is not None:
             owner._choose(str(event.option.prompt))
